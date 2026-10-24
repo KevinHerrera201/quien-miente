@@ -659,13 +659,11 @@ function nextCard() {
   $('#aprog').textContent = `Carta ${a.idx + 1} de ${a.cards.length}`;
   $('#aslot').innerHTML = card(c.catId, c.text, { num: a.idx + 1, attrs: 'id="acard"' });
   input.value = '';
-  input.readOnly = true;
   a.cardDeadline = 0;
   $('#abar').style.width = '100%';
   a.flipTimer = setTimeout(() => {
     $('#acard')?.classList.add('flipped');
     a.flipTimer = setTimeout(() => {
-      input.readOnly = false;
       if (document.activeElement !== input) input.focus();
       a.cardDeadline = Date.now() + a.T;
     }, 700);
