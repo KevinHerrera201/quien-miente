@@ -205,8 +205,8 @@ const PALETTE = [
   ['#74b9ff', '#0652dd'], ['#fab1a0', '#e17055'],
 ];
 
-const CATEGORIES = {};
-const LEVELS = {};
+export const CATEGORIES = {};
+export const LEVELS = {};
 
 for (const [levelKey, level] of Object.entries(RAW)) {
   const questions = [];
@@ -216,5 +216,3 @@ for (const [levelKey, level] of Object.entries(RAW)) {
   });
   LEVELS[levelKey] = { label: level.label, emoji: level.emoji, questions };
 }
-
-module.exports = { CATEGORIES, LEVELS };
