@@ -79,7 +79,7 @@ const F = makeDb();
 let clock = 1_000_000;
 const code = 'TEST1';
 const R = (p) => `rooms/${code}/${p}`;
-await F.set(R('meta'), { hostUid: 'ana', phase: 'lobby', settings: { numQuestions: 5, level: 'cabrones', hints: 1, answerTime: 6, revealTime: 20, numDetectives: 1 } });
+await F.set(R('meta'), { hostUid: 'ana', phase: 'lobby', settings: { numQuestions: 5, level: 'cabrones', answerTime: 4, revealTime: 200, numDetectives: 1 } });
 for (const [i, id] of ['ana', 'beto', 'caro'].entries()) {
   await F.set(R(`players/${id}`), { name: id, joinedAt: i, connected: true, lastSeen: clock });
 }
@@ -90,6 +90,9 @@ const meta = () => toClient(F.getAt(R('meta')));
 const pl = (id) => toClient(F.getAt(R(`players/${id}`)));
 const run = async (ms = 0) => { clock += ms; await eng.tick(); };
 
+ok(eng.settings.answerTime === 12 && eng.settings.revealTime === 120, 'tiempos fuera de rango se ajustan a 12 s y 2 min');
+await eng.updateSettings({ revealTime: 25 });
+ok(eng.settings.revealTime === 25 && !('hints' in eng.settings), 'revelar en 25 s y sin pistas');
 ok((await eng.startGame()).ok, 'partida iniciada');
 ok(meta().phase === 'roles', 'fase de roles');
 const dets = toArr(meta().detectiveOrder);
@@ -120,11 +123,6 @@ await F.push(R(`input/${det}`), { type: 'pick', liarId: t1, pos: 0, t: 2 });
 await run();
 ok(meta().phase === 'question' && meta().turn.question, 'pregunta revelada al voltear la carta');
 ok(!JSON.stringify(meta()).includes(`resp ${cards[t1][0].qIdx}`), 'la respuesta escrita sigue oculta');
-await F.push(R(`input/${det}`), { type: 'hint', t: 3 });
-await run();
-const priv = toClient(F.getAt(R(`private/${det}`)));
-ok(priv?.hint?.includes('"R"'), `pista privada: ${priv?.hint}`);
-ok(pl(det).hintsLeft === 0, 'se descontó la pista');
 await F.push(R(`input/${det}`), { type: 'decide', verdict: 'truth', t: 4 });
 await run();
 ok(meta().phase === 'question' && meta().turn.decided && !('decision' in meta().turn), 'decisión registrada sin revelarla al mentiroso');
@@ -148,9 +146,9 @@ ok(meta().deadline === clock + 1200 + 60000, 'antes de responder: 60 s para que 
 await run(15000);
 await F.push(R(`input/${t2}`), { type: 'reanswer', text: `Resp ${cards[t2][2].qIdx}`, t: 8 });
 await run();
-ok(meta().phase === 'question' && meta().deadline === clock + 20000, 'al responder empieza el reloj de revelar (20 s)');
-await run(19000);
-ok(meta().phase === 'question', 'aún no se revela antes de los 20 s');
+ok(meta().phase === 'question' && meta().deadline === clock + 25000, 'al responder empieza el reloj de revelar (25 s)');
+await run(24000);
+ok(meta().phase === 'question', 'aún no se revela antes de los 25 s');
 await F.push(R(`input/${det}`), { type: 'decide', verdict: 'truth', t: 9 });
 await run();
 ok(meta().result.match && meta().result.correct, 'dijo la verdad y el detective acertó');
@@ -228,8 +226,8 @@ ok(meta().phase === 'gameover' && meta().winner === 'detectives', 'si salen todo
 
 // 3 detectives y 1 mentiroso: turnos en orden fijo y nueva ronda al acabarse las cartas
 await eng.backToLobby();
-for (const [i, id] of ['beto', 'caro', 'dani'].entries()) {
-  await F.set(R(`players/${id}`), { name: id, joinedAt: i + 1, connected: true, lastSeen: clock });
+for (const [i, id] of ['ana', 'beto', 'caro', 'dani'].entries()) {
+  await F.set(R(`players/${id}`), { name: id, joinedAt: i, connected: true, lastSeen: clock });
 }
 await eng.updateSettings({ numDetectives: 3 });
 await eng.startGame();

@@ -8,7 +8,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
 import { firebaseConfig } from './firebase-config.js';
 import { CATEGORIES, LEVELS } from './questions.js';
-import { HostEngine, C, DEFAULT_SETTINGS, EMPTY, toArr } from './engine.js';
+import { HostEngine, C, DEFAULT_SETTINGS, EMPTY, toArr, sanitizeSettings } from './engine.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -193,11 +193,11 @@ function maybeTakeOverHost() {
 function buildState() {
   const d = R.data;
   const m = d.meta;
-  const settings = { ...DEFAULT_SETTINGS, ...m.settings };
+  const settings = sanitizeSettings({ ...DEFAULT_SETTINGS, ...m.settings });
   const players = Object.entries(d.players || {}).map(([id, p]) => ({
     id, name: p.name, connected: !!p.connected, guest: !!p.guest, joinedAt: p.joinedAt || 0,
     role: m.phase === 'lobby' ? null : (p.role || null),
-    lives: p.lives ?? C.LIVES, chips: p.chips || 0, alive: p.alive !== false, hintsLeft: p.hintsLeft || 0,
+    lives: p.lives ?? C.LIVES, chips: p.chips || 0, alive: p.alive !== false,
   })).sort((a, b) => a.joinedAt - b.joinedAt);
   const s = {
     code: R.code, phase: m.phase, deadline: m.deadline || null, round: m.round || 0, hostId: m.hostUid, meId: uid(),
@@ -232,7 +232,7 @@ function buildState() {
     if (m.phase !== 'pick') {
       Object.assign(s.turn, {
         catId: t.catId, question: t.question, decided: !!t.decided, reanswered: !!t.reanswered, flipMs: C.FLIP_MS,
-        myDecision: d.priv?.decision || null, hint: d.priv?.hint || null, myReanswer: d.priv?.reanswer ?? null,
+        myDecision: d.priv?.decision || null, myReanswer: d.priv?.reanswer ?? null,
       });
     }
   }
@@ -381,6 +381,11 @@ function card(catId, text, { flipped = false, cls = '', attrs = '', num = null }
   </div></div>`;
 }
 
+const fmtSecs = (v) => {
+  const min = Math.floor(v / 60);
+  const sec = v % 60;
+  return min ? `${min} min${sec ? ` ${sec} s` : ''}` : `${v} s`;
+};
 const hearts = (n) => '❤️'.repeat(n) + '🖤'.repeat(Math.max(0, 3 - n));
 const clock = (deadline, cls = 'clock') => `<span class="${cls}" data-deadline="${deadline}">${Math.max(0, Math.ceil((deadline - now()) / 1000))}</span>`;
 const bar = (deadline, total) => `<div class="timer-bar"><div data-deadline="${deadline}" data-total="${total}"></div></div>`;
@@ -561,12 +566,10 @@ function lobbyHtml(m) {
           <div class="full"><label>Dificultad</label>${opt('level', levels, s.level, (v) => `${catalog.levels[v]?.emoji || ''} ${esc(catalog.levels[v]?.label || v)}`)}</div>
           <div><label>Preguntas</label>${opt('numQuestions', range(5, 10), s.numQuestions)}</div>
           <div><label>Detectives</label>${opt('numDetectives', range(1, 3), s.numDetectives)}</div>
-          <div><label>Seg. por respuesta</label>${opt('answerTime', [4, 5, 6, 8, 10, 12, 15], s.answerTime, (v) => `${v} s`)}</div>
-          <div><label>Seg. para revelar</label>${opt('revealTime', [10, 15, 20, 25, 30, 40], s.revealTime, (v) => `${v} s`)}</div>
-          <div class="full"><label>Pistas por detective</label>${opt('hints', range(0, 3), s.hints)}</div>
+          <div><label>Seg. por respuesta</label>${opt('answerTime', [12, 15, 18, 20, 25], s.answerTime, (v) => `${v} s`)}</div>
+          <div><label>Tiempo para revelar</label>${opt('revealTime', [25, 30, 45, 60, 90, 120], s.revealTime, fmtSecs)}</div>
         </div>
         ${s.numDetectives > maxDet && connected >= 2 ? `<p class="muted small">Con ${connected} jugadores solo puede haber ${maxDet} detective(s); se ajustará al iniciar.</p>` : ''}
-        <p class="muted small">💡 Una pista le muestra al detective la primera letra y el largo de la respuesta escrita.</p>
         ${isHost
           ? `<button class="btn" data-action="start" ${connected < 2 ? 'disabled' : ''}>${connected < 2 ? 'Esperando jugadores (mín. 2)…' : '¡Iniciar partida!'}</button>`
           : '<p class="center muted" style="margin-top:16px">Esperando a que el admin inicie la partida…</p>'}
@@ -749,13 +752,11 @@ function questionHtml(m, entered) {
           <button class="btn">Enviar</button>
         </form>`;
   } else if (m.id === t.detectiveId) {
-    const hintsLeft = m.hintsLeft;
-    action = `<p class="muted">Escucha su respuesta. ¿Dijo lo mismo que escribió?</p>
+    action =`<p class="muted">Escucha su respuesta. ¿Dijo lo mismo que escribió?</p>
       <div class="verdict">
         <button class="btn red ${t.myDecision === 'liar' ? 'chosen' : ''}" data-action="decide" data-v="liar" ${t.myDecision ? 'disabled' : ''}>🤥 MENTIROSO</button>
         <button class="btn green ${t.myDecision === 'truth' ? 'chosen' : ''}" data-action="decide" data-v="truth" ${t.myDecision ? 'disabled' : ''}>😇 VERDAD</button>
       </div>
-      ${t.hint ? `<div class="note">💡 ${esc(t.hint)}</div>` : (hintsLeft > 0 && !t.myDecision ? `<button class="ghost" style="margin-top:12px" data-action="hint">💡 Usar pista (${hintsLeft})</button>` : '')}
       ${t.myDecision && !t.reanswered ? `<p class="muted small">Esperando a que ${pname(t.liarId)} escriba su respuesta…</p>` : ''}`;
   } else {
     action = `<p class="muted">Escucha a <b>${pname(t.liarId)}</b> en la llamada…</p>`;
@@ -900,7 +901,6 @@ const actions = {
   selLiar(el) { ui.selectedLiar = el.dataset.id; renderRoom(state); },
   pick(el) { sendInput({ type: 'pick', liarId: el.dataset.liar, pos: Number(el.dataset.pos) }); },
   decide(el) { sendInput({ type: 'decide', verdict: el.dataset.v }); },
-  hint() { sendInput({ type: 'hint' }); },
 
   reanswer(f) {
     const text = f.querySelector('input').value.trim();

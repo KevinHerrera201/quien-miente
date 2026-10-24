@@ -18,7 +18,7 @@ export const C = {
   HOST_TAKEOVER_MS: 15000,
 };
 
-export const DEFAULT_SETTINGS = { numQuestions: 5, level: 'panales', hints: 1, answerTime: 6, revealTime: 20, numDetectives: 1 };
+export const DEFAULT_SETTINGS = { numQuestions: 5, level: 'panales', answerTime: 12, revealTime: 30, numDetectives: 1 };
 
 export const EMPTY = ' ';
 
@@ -54,9 +54,8 @@ export function sanitizeSettings(s = {}) {
   return {
     numQuestions: n(s.numQuestions, 5, 10, D.numQuestions),
     level: LEVELS[s.level] ? s.level : D.level,
-    hints: n(s.hints, 0, 3, D.hints),
-    answerTime: n(s.answerTime, 4, 15, D.answerTime),
-    revealTime: n(s.revealTime, 10, 40, D.revealTime),
+    answerTime: n(s.answerTime, 12, 25, D.answerTime),
+    revealTime: n(s.revealTime, 25, 120, D.revealTime),
     numDetectives: n(s.numDetectives, 1, 3, D.numDetectives),
   };
 }
@@ -123,7 +122,7 @@ export class HostEngine {
   get meta() { return this.data.meta || {}; }
   get players() { return this.data.players || {}; }
   get hd() { return this.data.hostData || {}; }
-  get settings() { return { ...DEFAULT_SETTINGS, ...this.meta.settings }; }
+  get settings() { return sanitizeSettings({ ...DEFAULT_SETTINGS, ...this.meta.settings }); }
   get liarOrder() { return toArr(this.meta.liarOrder); }
   get detectiveOrder() { return toArr(this.meta.detectiveOrder); }
   get questions() { return toArr(this.hd.questions); }
@@ -203,7 +202,6 @@ export class HostEngine {
       case 'pick': return this.pick(uid, inp.liarId, inp.pos);
       case 'reanswer': return this.reanswer(uid, inp.text);
       case 'decide': return this.decide(uid, inp.verdict);
-      case 'hint': return this.useHint(uid);
       default: return null;
     }
   }
@@ -251,7 +249,6 @@ export class HostEngine {
         [`players/${id}/lives`]: C.LIVES,
         [`players/${id}/chips`]: 0,
         [`players/${id}/alive`]: true,
-        [`players/${id}/hintsLeft`]: det ? s.hints : 0,
       });
     }
     Object.assign(u, {
@@ -274,7 +271,7 @@ export class HostEngine {
     if (this.meta.phase !== 'gameover') return null;
     const u = { board: null, liar: null, answers: null, private: null, input: null, hostData: null };
     for (const id of Object.keys(this.players)) {
-      for (const k of ['role', 'lives', 'chips', 'alive', 'hintsLeft']) u[`players/${id}/${k}`] = null;
+      for (const k of ['role', 'lives', 'chips', 'alive']) u[`players/${id}/${k}`] = null;
     }
     Object.assign(u, {
       'meta/detectiveOrder': null, 'meta/liarOrder': null, 'meta/round': 0, 'meta/winner': null,
@@ -429,21 +426,6 @@ export class HostEngine {
       'hostData/turn': next,
       'meta/turn/decided': true,
       [`private/${byId}/decision`]: verdict,
-    });
-  }
-
-  useHint(byId) {
-    const t = this.hd.turn;
-    const det = this.p(byId);
-    if (this.meta.phase !== 'question' || !t || byId !== t.detectiveId || t.hint || !det || !(det.hintsLeft > 0)) return null;
-    const written = String(this.data.answers?.[t.liarId]?.[t.qIdx] || '').trim();
-    const hint = written
-      ? `Empieza con "${written[0].toUpperCase()}" y tiene ${written.replace(/\s/g, '').length} letras`
-      : 'No escribió nada en esta carta';
-    return this.write({
-      [`players/${byId}/hintsLeft`]: det.hintsLeft - 1,
-      'hostData/turn/hint': hint,
-      [`private/${byId}/hint`]: hint,
     });
   }
 
