@@ -147,6 +147,7 @@ await run(15000);
 await F.push(R(`input/${t2}`), { type: 'reanswer', text: `Resp ${cards[t2][2].qIdx}`, t: 8 });
 await run();
 ok(meta().phase === 'question' && meta().deadline === clock + 25000, 'al responder empieza el reloj de revelar (25 s)');
+ok(meta().turn.reanswer === `Resp ${cards[t2][2].qIdx}`, 'todos pueden leer lo que dijo el mentiroso');
 await run(24000);
 ok(meta().phase === 'question', 'aún no se revela antes de los 25 s');
 await F.push(R(`input/${det}`), { type: 'decide', verdict: 'truth', t: 9 });

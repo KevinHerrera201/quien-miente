@@ -28,6 +28,15 @@ const catalog = {
   levels: Object.fromEntries(Object.entries(LEVELS).map(([k, l]) => [k, { label: l.label, emoji: l.emoji }])),
 };
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+const AVATARS = ['😎', '🤠', '🥸', '🤓', '😈', '🤡', '👻', '💀', '👽', '🤖', '🥷', '🧙', '🧛', '🧟', '🦸', '🐱', '🐶', '🦊', '🐼', '🐸', '🐵', '🦁', '🐯', '🐷', '🐙', '🦄', '🐔', '🐧', '🦖', '🍕', '🌮', '🔥', '⭐', '🍀', '⚽', '🎸'];
+function myAvatar() {
+  let a = store.get('avatar', null);
+  if (!AVATARS.includes(a)) {
+    a = AVATARS[crypto.getRandomValues(new Uint32Array(1))[0] % AVATARS.length];
+    store.set('avatar', a);
+  }
+  return a;
+}
 
 if (!firebaseConfig?.apiKey || firebaseConfig.apiKey.startsWith('PEGA')) {
   app.innerHTML = `<div class="wrap"><div class="logo"><div class="icons">🕵️🎭</div><h1>¿Quién <span>Miente?</span></h1></div>
@@ -196,6 +205,7 @@ function buildState() {
   const settings = sanitizeSettings({ ...DEFAULT_SETTINGS, ...m.settings });
   const players = Object.entries(d.players || {}).map(([id, p]) => ({
     id, name: p.name, connected: !!p.connected, guest: !!p.guest, joinedAt: p.joinedAt || 0,
+    emoji: AVATARS.includes(p.emoji) ? p.emoji : '🙂',
     role: m.phase === 'lobby' ? null : (p.role || null),
     lives: p.lives ?? C.LIVES, chips: p.chips || 0, alive: p.alive !== false,
   })).sort((a, b) => a.joinedAt - b.joinedAt);
@@ -232,7 +242,7 @@ function buildState() {
     if (m.phase !== 'pick') {
       Object.assign(s.turn, {
         catId: t.catId, question: t.question, decided: !!t.decided, reanswered: !!t.reanswered, flipMs: C.FLIP_MS,
-        myDecision: d.priv?.decision || null, myReanswer: d.priv?.reanswer ?? null,
+        myDecision: d.priv?.decision || null, reanswer: t.reanswer ?? null,
       });
     }
   }
@@ -268,7 +278,7 @@ async function addSelfToRoom(code, players) {
   let name = base;
   for (let i = 2; taken.has(name.toLowerCase()); i++) name = `${base.slice(0, 13)}${i}`;
   await set(ref(db, `rooms/${code}/players/${uid()}`), {
-    name, guest: !isRegistered(), joinedAt: serverTimestamp(), connected: true, lastSeen: serverTimestamp(),
+    name, emoji: myAvatar(), guest: !isRegistered(), joinedAt: serverTimestamp(), connected: true, lastSeen: serverTimestamp(),
   });
 }
 
@@ -497,11 +507,11 @@ function playersHtml() {
     const p = player(id);
     if (!p) return '';
     const isDet = p.role === 'detective';
-    const meta = isDet ? `${hearts(p.lives)} · 🪙${p.chips}` : (p.alive ? 'En juego' : '☠️ Eliminado');
+    const meta = `${ROLE[p.role]?.icon || ''} ${isDet ? `${hearts(p.lives)} · 🪙${p.chips}` : (p.alive ? 'En juego' : '☠️ Eliminado')}`;
     const active = ['pick', 'question', 'result'].includes(state.phase) && (id === t.detectiveId || id === t.liarId);
     return `<div class="pl ${p.alive ? '' : 'out'} ${active ? 'active' : ''}">
-      <span class="av">${ROLE[p.role]?.icon || '🙂'}</span>
-      <div><span class="nm">${esc(p.name)}${id === state.meId ? ' (tú)' : ''}</span><span class="meta">${meta}</span></div>
+      <span class="av">${p.emoji}</span>
+      <div><span class="nm">${esc(p.name)}${id === state.hostId ? ' 👑' : ''}${id === state.meId ? ' (tú)' : ''}</span><span class="meta">${meta}</span></div>
       ${p.connected ? '' : '<span class="off" title="Desconectado">●</span>'}
     </div>`;
   }).join('');
@@ -554,11 +564,14 @@ function lobbyHtml(m) {
         <h3 style="margin-top:20px;text-align:left">Jugadores (${state.players.length}/${state.maxPlayers})</h3>
         <ul class="player-list">
           ${state.players.map((p) => `<li>
-            <span>${p.id === state.hostId ? '👑' : '🙂'}</span>
-            <span class="grow">${esc(p.name)}${p.id === m.id ? ' (tú)' : ''}${p.guest ? ' <span class="muted small">· invitado</span>' : ''}${p.connected ? '' : ' <span class="muted small">· desconectado</span>'}</span>
+            ${p.id === m.id
+              ? `<button class="avatar-me" data-action="avatarMenu" title="Cambiar emoji">${p.emoji}<span>✏️</span></button>`
+              : `<span class="avatar">${p.emoji}</span>`}
+            <span class="grow">${esc(p.name)}${p.id === state.hostId ? ' 👑' : ''}${p.id === m.id ? ' (tú)' : ''}${p.guest ? ' <span class="muted small">· invitado</span>' : ''}${p.connected ? '' : ' <span class="muted small">· desconectado</span>'}</span>
             ${isHost && p.id !== m.id ? `<button class="kick" data-action="kick" data-id="${esc(p.id)}" title="Sacar">✕</button>` : ''}
           </li>`).join('')}
         </ul>
+        ${ui.avatarOpen ? `<div class="avatar-picker"><div class="muted small">Elige tu emoji</div><div class="avatar-grid">${AVATARS.map((a) => `<button class="avatar-btn ${a === m.emoji ? 'on' : ''}" data-action="setAvatar" data-e="${a}">${a}</button>`).join('')}</div></div>` : ''}
       </div>
       <div class="panel">
         <h3>Ajustes ${isHost ? '' : '<span class="muted small">(solo el admin los cambia)</span>'}</h3>
@@ -744,8 +757,8 @@ function questionHtml(m, entered) {
     : `Esperando a que ${pname(t.liarId)} responda · ${clock(state.deadline)} s`;
   let action = '';
   if (m.id === t.liarId) {
-    action = t.myReanswer != null
-      ? `<div class="secret"><div class="lbl">Lo que dijiste</div><div class="val">${esc(shown(t.myReanswer) || '(vacío)')}</div></div>`
+    action = t.reanswered
+      ? ''
       : `<p><b>Responde en voz alta en la llamada</b> y escríbelo aquí:</p>
         <form class="answer-form" data-action="reanswer">
           <input type="text" id="reanswer" maxlength="60" autocomplete="off" placeholder="Lo que dices…" enterkeyhint="send">
@@ -764,7 +777,10 @@ function questionHtml(m, entered) {
   return `<div class="banner">${pname(t.detectiveId)} interroga a ${pname(t.liarId)}</div>
     <p class="sub">Carta ${t.pos + 1} · ${timing}</p>
     ${card(t.catId, t.question, { flipped: !entered, attrs: 'id="turn-card"' })}
-    <div class="secret"><div class="lbl">Respuesta escrita</div><div class="val">🔒 Oculta</div></div>
+    <div class="row" style="max-width:420px;margin:0 auto">
+      <div class="secret"><div class="lbl">Escribió al inicio</div><div class="val">🔒 Oculta</div></div>
+      <div class="secret ${t.reanswered ? 'revealed' : ''}"><div class="lbl">Dijo ahora</div><div class="val">${t.reanswered ? esc(shown(t.reanswer) || '(nada)') : '⏳ …'}</div></div>
+    </div>
     ${bar(state.deadline, total)}
     ${action}
     <div class="status-row">
@@ -798,7 +814,7 @@ function gameoverHtml(m) {
     <div class="banner" style="font-size:30px">¡Ganan los ${state.winner === 'detectives' ? 'detectives' : 'mentirosos'}!</div>
     <p class="sub">${iWon ? '¡Felicidades, ganaste! 🎉' : 'Será la próxima…'}</p>
     <ul class="leader">${sorted.map((p) => `<li class="${p.role === winRole ? 'win' : ''}">
-      <span>${ROLE[p.role]?.icon || ''}</span><span class="grow">${esc(p.name)}</span>
+      <span>${p.emoji}</span><span class="grow">${esc(p.name)} ${ROLE[p.role]?.icon || ''}</span>
       <span>${p.role === 'detective' ? hearts(p.lives) : (p.alive ? 'Sobrevivió' : '☠️')}</span><b>🪙 ${p.chips}</b></li>`).join('')}</ul>
     ${state.hostId === m.id
       ? '<button class="btn" style="max-width:420px" data-action="lobby">Volver a la sala</button>'
@@ -899,6 +915,14 @@ const actions = {
   start: hostOnly((e) => e.startGame()),
   lobby: hostOnly((e) => e.backToLobby()),
   selLiar(el) { ui.selectedLiar = el.dataset.id; renderRoom(state); },
+  avatarMenu() { ui.avatarOpen = !ui.avatarOpen; renderRoom(state); },
+  setAvatar(el) {
+    const e = el.dataset.e;
+    if (!AVATARS.includes(e)) return;
+    store.set('avatar', e);
+    ui.avatarOpen = false;
+    update(roomRef(`players/${uid()}`), { emoji: e }).catch(() => toast('No se pudo cambiar el emoji'));
+  },
   pick(el) { sendInput({ type: 'pick', liarId: el.dataset.liar, pos: Number(el.dataset.pos) }); },
   decide(el) { sendInput({ type: 'decide', verdict: el.dataset.v }); },
 

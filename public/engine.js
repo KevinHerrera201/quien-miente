@@ -411,6 +411,7 @@ export class HostEngine {
     return this.write({
       'hostData/turn': next,
       'meta/turn/reanswered': true,
+      'meta/turn/reanswer': clean,
       'meta/deadline': this.now() + this.settings.revealTime * 1000,
       [`private/${byId}/reanswer`]: clean,
     });
