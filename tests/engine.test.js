@@ -144,8 +144,13 @@ await run();
 ok(meta().phase === 'pick', 'rechaza al mentiroso repetido');
 await F.push(R(`input/${det}`), { type: 'pick', liarId: t2, pos: 2, t: 7 });
 await run();
+ok(meta().deadline === clock + 1200 + 60000, 'antes de responder: 60 s para que el mentiroso conteste');
+await run(15000);
 await F.push(R(`input/${t2}`), { type: 'reanswer', text: `Resp ${cards[t2][2].qIdx}`, t: 8 });
 await run();
+ok(meta().phase === 'question' && meta().deadline === clock + 20000, 'al responder empieza el reloj de revelar (20 s)');
+await run(19000);
+ok(meta().phase === 'question', 'aún no se revela antes de los 20 s');
 await F.push(R(`input/${det}`), { type: 'decide', verdict: 'truth', t: 9 });
 await run();
 ok(meta().result.match && meta().result.correct, 'dijo la verdad y el detective acertó');
@@ -162,8 +167,10 @@ ok(meta().phase === 'pick', 'no se puede repetir una carta');
 // Tiempo agotado sin elegir: el juego elige solo; sin decisión el detective pierde vida
 await run(60100);
 ok(meta().phase === 'question' && meta().turn.liarId === t1, 'elección automática al acabarse el tiempo');
-await run(21300);
-ok(meta().phase === 'result' && meta().result.timeout && pl(det).lives === 1, 'sin decisión a tiempo: pierde vida');
+await run(30000);
+ok(meta().phase === 'question', 'sin respuesta del mentiroso el reloj de revelar no ha empezado');
+await run(31300);
+ok(meta().phase === 'result' && meta().result.timeout && pl(det).lives === 1, 'nadie respondió a tiempo: el detective pierde vida');
 
 // Último error: detective sin vidas -> ganan los mentirosos
 await run(7100);

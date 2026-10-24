@@ -735,7 +735,10 @@ function boardRow(b) {
 
 function questionHtml(m, entered) {
   const t = state.turn;
-  const total = state.settings.revealTime * 1000 + t.flipMs;
+  const total = t.reanswered ? state.settings.revealTime * 1000 : C.REANSWER_MS + t.flipMs;
+  const timing = t.reanswered
+    ? `La respuesta se revela en ${clock(state.deadline)} s`
+    : `Esperando a que ${pname(t.liarId)} responda · ${clock(state.deadline)} s`;
   let action = '';
   if (m.id === t.liarId) {
     action = t.myReanswer != null
@@ -758,7 +761,7 @@ function questionHtml(m, entered) {
     action = `<p class="muted">Escucha a <b>${pname(t.liarId)}</b> en la llamada…</p>`;
   }
   return `<div class="banner">${pname(t.detectiveId)} interroga a ${pname(t.liarId)}</div>
-    <p class="sub">Carta ${t.pos + 1} · ${clock(state.deadline)} s</p>
+    <p class="sub">Carta ${t.pos + 1} · ${timing}</p>
     ${card(t.catId, t.question, { flipped: !entered, attrs: 'id="turn-card"' })}
     <div class="secret"><div class="lbl">Respuesta escrita</div><div class="val">🔒 Oculta</div></div>
     ${bar(state.deadline, total)}

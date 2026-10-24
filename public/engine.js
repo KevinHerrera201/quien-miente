@@ -9,6 +9,7 @@ export const C = {
   ROLE_MS: 6000,
   FLIP_MS: 1200,
   PICK_MS: 60000,
+  REANSWER_MS: 60000,
   RESULT_MS: 7000,
   ROUND_MS: 5000,
   CHIPS_PER_HIT: 5,
@@ -399,7 +400,7 @@ export class HostEngine {
       'meta/turn': { detectiveId: byId, liarId, pos, catId: q.catId, question: q.text, decided: false, reanswered: false },
     };
     this.log(u, `${this.p(byId)?.name} interroga a ${this.p(liarId)?.name} sobre ${CATEGORIES[q.catId].name}`);
-    this.phase(u, 'question', this.settings.revealTime * 1000 + C.FLIP_MS);
+    this.phase(u, 'question', C.FLIP_MS + C.REANSWER_MS);
     return this.write(u);
   }
 
@@ -409,9 +410,11 @@ export class HostEngine {
     const clean = String(text || '').replace(/\s+/g, ' ').trim().slice(0, 60) || EMPTY;
     const next = { ...t, reanswer: clean, reanswered: true };
     if (t.decision) return this.resolve(next);
+    // The reveal countdown only starts once the liar has given their answer.
     return this.write({
       'hostData/turn': next,
       'meta/turn/reanswered': true,
+      'meta/deadline': this.now() + this.settings.revealTime * 1000,
       [`private/${byId}/reanswer`]: clean,
     });
   }
