@@ -1,8 +1,9 @@
 {
   "rules": {
     "users": {
+      ".read": "auth != null",
+      ".indexOn": ["wins"],
       "$uid": {
-        ".read": "auth != null && auth.uid === $uid",
         ".write": "auth != null && auth.uid === $uid"
       }
     },

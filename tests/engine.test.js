@@ -1,6 +1,7 @@
 // Prueba el motor de partida contra una base de datos en memoria que imita a Firebase RTDB.
 // Uso: npm test
 import { HostEngine, answersMatch, toArr } from '../public/engine.js';
+import { settlement, levelInfo, xpForGame } from '../public/profile.js';
 
 let failed = 0;
 const ok = (cond, msg) => { console.log(cond ? '✅' : '❌', msg); if (!cond) failed++; };
@@ -55,6 +56,10 @@ function makeDb() {
       for (const [k, v] of Object.entries(obj)) setAt(`${r.path}/${k}`, v);
       notify();
     },
+    get: async (r) => {
+      const v = getAt(r.path);
+      return { val: () => toClient(v), exists: () => v !== null };
+    },
     onValue: (r, cb) => {
       const l = { path: r.path, cb, last: undefined };
       db.listeners.push(l);
@@ -99,6 +104,8 @@ const dets = toArr(meta().detectiveOrder);
 const liars = toArr(meta().liarOrder);
 ok(dets.length === 1 && liars.length === 2, `1 detective (${dets}) y 2 mentirosos (${liars})`);
 const det = dets[0];
+ok(liars.every((id) => pl(id).lives === 2) && pl(det).lives === 3, 'mentirosos con 2 vidas y detective con 3');
+ok(!meta().bet && !meta().bettors, 'sin apuesta por defecto');
 
 await run(6100);
 ok(meta().phase === 'answering', 'fase de respuestas');
@@ -153,7 +160,7 @@ ok(meta().phase === 'question', 'aún no se revela antes de los 25 s');
 await F.push(R(`input/${det}`), { type: 'decide', verdict: 'truth', t: 9 });
 await run();
 ok(meta().result.match && meta().result.correct, 'dijo la verdad y el detective acertó');
-ok(pl(t2).alive === false && pl(det).chips === 5, 'mentiroso eliminado y +5 fichas');
+ok(pl(t2).alive === true && pl(t2).lives === 1 && pl(det).points === 5, 'mentiroso pierde 1 de sus 2 vidas y el detective gana 5 puntos');
 
 // Turno 3: la carta 1 ya usada de t1 no se puede repetir
 await run(7100);
@@ -173,12 +180,13 @@ ok(meta().phase === 'result' && meta().result.timeout && pl(det).lives === 1, 'n
 
 // Último error: detective sin vidas -> ganan los mentirosos
 await run(7100);
-const free = toArr(F.getAt(R(`board/${t1}`))).find((c) => !c.asked);
-await F.push(R(`input/${det}`), { type: 'pick', liarId: t1, pos: free.pos, t: 11 });
+const t4 = toArr(meta().turn.eligible)[0];
+const free = toArr(F.getAt(R(`board/${t4}`))).find((c) => !c.asked);
+await F.push(R(`input/${det}`), { type: 'pick', liarId: t4, pos: free.pos, t: 11 });
 await run();
 await F.push(R(`input/${det}`), { type: 'decide', verdict: 'liar', t: 12 });
 await run();
-await F.push(R(`input/${t1}`), { type: 'reanswer', text: `resp ${cards[t1][free.pos].qIdx}`, t: 13 });
+await F.push(R(`input/${t4}`), { type: 'reanswer', text: `resp ${cards[t4][free.pos].qIdx}`, t: 13 });
 await run();
 ok(meta().result.correct === false && pl(det).lives === 0, 'detective se queda sin vidas');
 await run(7100);
@@ -205,12 +213,11 @@ while (meta().phase === 'pick' && turns < 20) {
   await run();
   await F.push(R(`input/${target}`), { type: 'reanswer', text: 'x', t: 200 + turns });
   await run();
-  // alterna aciertos: sólo acierta en los primeros 2 turnos, luego "falla" diciendo mentiroso
   await F.push(R(`input/${d2}`), { type: 'decide', verdict: 'truth', t: 300 + turns });
   await run();
   await run(7100);
 }
-ok(meta().phase === 'gameover' && meta().winner === 'detectives', `con aciertos ganan los detectives (${turns} turnos)`);
+ok(meta().phase === 'gameover' && meta().winner === 'detectives' && turns === 4, `2 aciertos por mentiroso: ganan los detectives en ${turns} turnos`);
 
 // Salida de un jugador a media partida
 await eng.backToLobby();
@@ -257,6 +264,40 @@ await run(5100);
 ok(meta().phase === 'answering' && meta().round === 2, 'empieza la ronda 2 con preguntas nuevas');
 const r1 = new Set(toArr(toClient(F.getAt(R(`liar/${liar}`))).cards).map((c) => c.text));
 ok(r1.size === 5, 'ronda 2 con 5 cartas nuevas');
+
+// Un mentiroso sin vidas no recibe cartas en las siguientes rondas
+await F.set(R(`players/${liar}/alive`), false);
+await eng.startRound();
+ok(!F.getAt(R(`liar/${liar}`)) && !F.getAt(R(`board/${liar}`)), 'mentiroso eliminado ya no recibe cartas');
+
+// Apuestas: solo apuestan los registrados que alcanzan a cubrir la apuesta
+await F.set(R('meta/phase'), 'lobby');
+await F.set('users/ana', { name: 'ana', chips: 100 });
+await F.set('users/beto', { name: 'beto', chips: 5 });
+await F.set('users/caro', { name: 'caro', chips: 50 });
+for (const [i, id] of ['ana', 'beto', 'caro', 'dani'].entries()) {
+  await F.set(R(`players/${id}`), { name: id, joinedAt: i, connected: true, lastSeen: clock, guest: id === 'dani' });
+}
+await eng.updateSettings({ bet: 27, numDetectives: 1 });
+ok(eng.settings.bet === 30, 'la apuesta se redondea de 10 en 10');
+await eng.updateSettings({ bet: 20 });
+await eng.startGame();
+const bettors = meta().bettors || {};
+ok(meta().bet === 20 && Object.keys(bettors).sort().join() === 'ana,caro', 'apuestan ana y caro (beto no alcanza, dani es invitado)');
+ok(Object.entries(bettors).every(([id, role]) => pl(id).role === role), 'se guarda el rol de cada apostador');
+
+// Reparto del bote
+let s = settlement({ bet: 20, bettors: { a: 'detective', b: 'liar', c: 'liar' }, winner: 'liars' });
+ok(s.pot === 60 && s.payout.a === 0 && s.payout.b === 30 && s.payout.c === 30, 'ganan mentirosos: se reparten el bote de 60 (30 c/u)');
+s = settlement({ bet: 10, bettors: { a: 'detective', b: 'detective', c: 'liar' }, winner: 'detectives' });
+ok(s.payout.a === 15 && s.payout.b === 15 && s.payout.c === 0, 'ganan 2 detectives: 15 c/u');
+s = settlement({ bet: 10, bettors: { a: 'liar', b: 'liar' }, winner: 'detectives' });
+ok(s.payout.a === 10 && s.payout.b === 10, 'si nadie del equipo ganador apostó, se devuelve la apuesta');
+
+// Niveles
+ok(levelInfo(0).level === 1 && levelInfo(99).level === 1 && levelInfo(100).level === 2 && levelInfo(1000).level === 5, 'niveles por experiencia');
+ok(levelInfo(4500).rankName === 'Detective Privado' || levelInfo(4500).level === 10, `rango en nivel 10: ${levelInfo(4500).rankName}`);
+ok(xpForGame({ won: true, points: 10, survived: false }) === 45, 'experiencia: 10 por jugar + 25 por ganar + puntos');
 
 eng.stop();
 console.log(failed ? `\n${failed} prueba(s) fallaron` : '\n🎉 Todas las pruebas pasaron');

@@ -2,6 +2,7 @@
 // (including secret answers, allowed by the database rules only to the admin)
 // and is the only writer of phases, turns and results.
 import { CATEGORIES, LEVELS } from './questions.js';
+import { sanitizeBet } from './profile.js';
 
 export const C = {
   MAX_PLAYERS: 12,
@@ -12,13 +13,14 @@ export const C = {
   REANSWER_MS: 60000,
   RESULT_MS: 7000,
   ROUND_MS: 5000,
-  CHIPS_PER_HIT: 5,
-  LIVES: 3,
+  POINTS_PER_HIT: 5,
+  DET_LIVES: 3,
+  LIAR_LIVES: 2,
   LOBBY_DROP_MS: 90000,
   HOST_TAKEOVER_MS: 15000,
 };
 
-export const DEFAULT_SETTINGS = { numQuestions: 5, level: 'panales', answerTime: 12, revealTime: 30, numDetectives: 1 };
+export const DEFAULT_SETTINGS = { numQuestions: 5, level: 'panales', answerTime: 12, revealTime: 30, numDetectives: 1, bet: 0 };
 
 export const EMPTY = ' ';
 
@@ -57,6 +59,7 @@ export function sanitizeSettings(s = {}) {
     answerTime: n(s.answerTime, 12, 25, D.answerTime),
     revealTime: n(s.revealTime, 25, 120, D.revealTime),
     numDetectives: n(s.numDetectives, 1, 3, D.numDetectives),
+    bet: sanitizeBet(s.bet),
   };
 }
 
@@ -178,7 +181,7 @@ export class HostEngine {
 
     if (m.phase === 'answering') {
       if (this.allAnswered()) return this.startInterrogation();
-      const progress = Object.fromEntries(this.liarOrder.map((id) => [id, Object.keys(this.data.answers?.[id] || {}).length]));
+      const progress = Object.fromEntries(this.activeLiars().map((id) => [id, Object.keys(this.data.answers?.[id] || {}).length]));
       if (JSON.stringify(progress) !== JSON.stringify(m.progress || {})) await this.write({ 'meta/progress': progress });
     }
 
@@ -240,18 +243,24 @@ export class HostEngine {
     const s = this.settings;
     const nd = Math.min(s.numDetectives, ps.length - 1);
     const dets = shuffle(ps).slice(0, nd);
+    const bettors = await this.findBettors(ps, s.bet);
     const u = { board: null, liar: null, answers: null, private: null, input: null, hostData: null };
+    const bettorRoles = {};
     for (const [id] of all) if (!ps.includes(id)) u[`players/${id}`] = null;
     for (const id of ps) {
       const det = dets.includes(id);
+      const role = det ? 'detective' : 'liar';
+      if (bettors.includes(id)) bettorRoles[id] = role;
       Object.assign(u, {
-        [`players/${id}/role`]: det ? 'detective' : 'liar',
-        [`players/${id}/lives`]: C.LIVES,
-        [`players/${id}/chips`]: 0,
+        [`players/${id}/role`]: role,
+        [`players/${id}/lives`]: det ? C.DET_LIVES : C.LIAR_LIVES,
+        [`players/${id}/points`]: 0,
         [`players/${id}/alive`]: true,
       });
     }
     Object.assign(u, {
+      'meta/bettors': bettors.length ? bettorRoles : null,
+      'meta/bet': bettors.length ? s.bet : 0,
       'meta/detectiveOrder': shuffle(dets),
       'meta/liarOrder': shuffle(ps.filter((id) => !dets.includes(id))),
       'meta/round': 0,
@@ -267,13 +276,27 @@ export class HostEngine {
     return { ok: true };
   }
 
+  // Registered players who can cover the bet put it in the pot; guests play without betting.
+  async findBettors(ids, bet) {
+    if (!bet) return [];
+    const res = await Promise.all(ids.map(async (id) => {
+      if (this.p(id)?.guest !== false) return null;
+      try {
+        const snap = await this.fb.get(this.fb.ref(this.db, `users/${id}/chips`));
+        return (snap.val() || 0) >= bet ? id : null;
+      } catch { return null; }
+    }));
+    return res.filter(Boolean);
+  }
+
   backToLobby() {
     if (this.meta.phase !== 'gameover') return null;
     const u = { board: null, liar: null, answers: null, private: null, input: null, hostData: null };
     for (const id of Object.keys(this.players)) {
-      for (const k of ['role', 'lives', 'chips', 'alive']) u[`players/${id}/${k}`] = null;
+      for (const k of ['role', 'lives', 'points', 'alive']) u[`players/${id}/${k}`] = null;
     }
     Object.assign(u, {
+      'meta/bettors': null, 'meta/bet': null,
       'meta/detectiveOrder': null, 'meta/liarOrder': null, 'meta/round': 0, 'meta/winner': null,
       'meta/result': null, 'meta/turn': null, 'meta/progress': null, 'meta/log': null, 'meta/numQuestions': null,
     });
@@ -287,8 +310,6 @@ export class HostEngine {
     const s = this.settings;
     const round = (this.meta.round || 0) + 1;
     const u = {};
-    for (const id of this.liarOrder) u[`players/${id}/alive`] = true;
-
     const pool = LEVELS[s.level].questions;
     let used = { ...(this.hd.usedQ || {}) };
     let avail = pool.filter((q) => !used[q.id]);
@@ -301,7 +322,7 @@ export class HostEngine {
     u.private = null;
     u.board = {};
     u.liar = {};
-    for (const id of this.liarOrder) {
+    for (const id of this.activeLiars()) {
       const order = shuffle(qs.map((_, i) => i));
       u.liar[id] = { order, cards: order.map((qi) => ({ qIdx: qi, catId: qs[qi].catId, text: qs[qi].text })) };
       u.board[id] = order.map((qi, pos) => ({ pos, catId: qs[qi].catId, asked: false }));
@@ -319,9 +340,14 @@ export class HostEngine {
     return this.write(u);
   }
 
+  // Liars still in the game; those who lost both lives sit out the remaining rounds.
+  activeLiars() {
+    return this.liarOrder.filter((id) => this.p(id)?.alive);
+  }
+
   allAnswered() {
     const n = this.questions.length;
-    return n > 0 && this.liarOrder.every((id) => Object.keys(this.data.answers?.[id] || {}).length >= n);
+    return n > 0 && this.activeLiars().every((id) => Object.keys(this.data.answers?.[id] || {}).length >= n);
   }
 
   startInterrogation() {
@@ -439,12 +465,17 @@ export class HostEngine {
     const match = spoken !== null && answersMatch(written, spoken);
     const correct = t.decision ? (t.decision === 'truth') === match : false;
     const u = {};
+    let liarLives = liar.lives ?? C.LIAR_LIVES;
     if (correct) {
-      u[`players/${t.detectiveId}/chips`] = (det.chips || 0) + C.CHIPS_PER_HIT;
-      u[`players/${t.liarId}/alive`] = false;
-      this.log(u, `✅ ${det.name} acertó: ${liar.name} queda eliminado`);
+      liarLives = Math.max(0, liarLives - 1);
+      u[`players/${t.detectiveId}/points`] = (det.points || 0) + C.POINTS_PER_HIT;
+      u[`players/${t.liarId}/lives`] = liarLives;
+      if (!liarLives) u[`players/${t.liarId}/alive`] = false;
+      this.log(u, liarLives
+        ? `✅ ${det.name} acertó: ${liar.name} pierde una vida`
+        : `✅ ${det.name} acertó: ${liar.name} queda eliminado`);
     } else {
-      const lives = Math.max(0, (det.lives ?? C.LIVES) - 1);
+      const lives = Math.max(0, (det.lives ?? C.DET_LIVES) - 1);
       u[`players/${t.detectiveId}/lives`] = lives;
       if (!lives) u[`players/${t.detectiveId}/alive`] = false;
       this.log(u, `❌ ${det.name} falló y pierde una vida${lives ? '' : ' (eliminado)'}`);
@@ -456,6 +487,7 @@ export class HostEngine {
     u['meta/result'] = {
       detectiveId: t.detectiveId, liarId: t.liarId, catId: q.catId, question: q.text,
       written, reanswer: spoken, match, verdict: t.decision || null, correct, timeout: !t.decision,
+      liarLives,
     };
     this.phase(u, 'result', C.RESULT_MS);
     return this.write(u);

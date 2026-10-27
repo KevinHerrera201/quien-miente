@@ -5,10 +5,14 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
   getDatabase, ref, onValue, set, update, remove, get, push, onDisconnect, serverTimestamp, runTransaction,
+  query, orderByChild, limitToLast,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
 import { firebaseConfig } from './firebase-config.js';
 import { CATEGORIES, LEVELS } from './questions.js';
 import { HostEngine, C, DEFAULT_SETTINGS, EMPTY, toArr, sanitizeSettings } from './engine.js';
+import {
+  START_CHIPS, RESCUE_CHIPS, RESCUE_BELOW, RESCUE_EVERY_MS, BET_STEP, MAX_BET, levelInfo, xpForGame, settlement,
+} from './profile.js';
 
 const $ = (s, el = document) => el.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -48,7 +52,7 @@ const fbApp = initializeApp(firebaseConfig);
 const auth = getAuth(fbApp);
 auth.languageCode = 'es';
 const db = getDatabase(fbApp);
-const fb = { ref, update, onValue };
+const fb = { ref, update, onValue, get };
 
 let fbUser = null;
 let profile = null;
@@ -172,7 +176,8 @@ function onRoomData(key) {
   const prev = state;
   state = buildState();
   if (prev?.phase !== state.phase || prev?.turn?.liarId !== state.turn?.liarId) ui.selectedLiar = null;
-  if (state.phase === 'gameover') recordStats();
+  if (state.phase === 'gameover') settleGame();
+  else debitBet();
   renderRoom(prev);
 }
 
@@ -206,13 +211,15 @@ function buildState() {
   const players = Object.entries(d.players || {}).map(([id, p]) => ({
     id, name: p.name, connected: !!p.connected, guest: !!p.guest, joinedAt: p.joinedAt || 0,
     emoji: AVATARS.includes(p.emoji) ? p.emoji : '🙂',
+    level: Number.isInteger(p.level) ? p.level : null,
     role: m.phase === 'lobby' ? null : (p.role || null),
-    lives: p.lives ?? C.LIVES, chips: p.chips || 0, alive: p.alive !== false,
+    lives: p.lives ?? (p.role === 'liar' ? C.LIAR_LIVES : C.DET_LIVES), points: p.points || 0, alive: p.alive !== false,
   })).sort((a, b) => a.joinedAt - b.joinedAt);
   const s = {
     code: R.code, phase: m.phase, deadline: m.deadline || null, round: m.round || 0, hostId: m.hostUid, meId: uid(),
     settings, winner: m.winner || null, gameId: m.gameId || null, log: toArr(m.log), maxPlayers: C.MAX_PLAYERS, players,
     detectiveOrder: toArr(m.detectiveOrder), liarOrder: toArr(m.liarOrder), numQuestions: m.numQuestions || 0,
+    bet: m.bet || 0, bettors: m.bettors || {},
   };
   const myRole = players.find((p) => p.id === uid())?.role;
   const myCards = toArr(d.liar?.cards);
@@ -220,7 +227,7 @@ function buildState() {
   if (m.phase === 'answering') {
     s.answering = {
       start: m.answerStart, answerTime: settings.answerTime, flipMs: C.FLIP_MS,
-      progress: s.liarOrder.map((id) => ({ id, done: m.progress?.[id] || 0 })),
+      progress: s.liarOrder.filter((id) => players.find((p) => p.id === id)?.alive).map((id) => ({ id, done: m.progress?.[id] || 0 })),
     };
     if (myRole === 'liar' && myCards.length) {
       s.answering.cards = myCards;
@@ -244,27 +251,60 @@ function buildState() {
         catId: t.catId, question: t.question, decided: !!t.decided, reanswered: !!t.reanswered, flipMs: C.FLIP_MS,
         myDecision: d.priv?.decision || null, reanswer: t.reanswer ?? null,
       });
+      if (uid() === t.liarId) {
+        const qIdx = myCards[t.pos]?.qIdx;
+        s.turn.myWritten = qIdx === undefined ? null : String(d.answers?.[qIdx] ?? '');
+      }
     }
   }
   if (m.phase === 'result') s.result = m.result;
   return s;
 }
 
-function recordStats() {
-  const m = me();
-  if (!isRegistered() || !m.role || !state.gameId || R.statsFor === state.gameId) return;
-  R.statsFor = state.gameId;
-  const key = `stats:${R.code}:${state.gameId}`;
-  if (store.get(key, false)) return;
-  store.set(key, true);
-  const won = m.role === (state.winner === 'detectives' ? 'detective' : 'liar');
+// The bet leaves your balance when the game starts, so leaving early doesn't dodge a loss.
+// `debited`/`settled` on the profile make both steps idempotent across tabs and devices.
+function debitBet() {
+  const m = R.data.meta;
+  if (!isRegistered() || !m?.bet || !m.bettors?.[uid()] || ['lobby', 'gameover'].includes(m.phase)) return;
+  const key = `${R.code}:${m.gameId}`;
+  if (R.debitFor === key) return;
+  R.debitFor = key;
   runTransaction(ref(db, `users/${uid()}`), (u) => {
-    u = u || { name: myName(), chips: 0, games: 0, wins: 0 };
-    u.chips = (u.chips || 0) + m.chips;
+    if (!u || u.debited === key) return u;
+    u.chips = (u.chips || 0) - m.bet;
+    u.debited = key;
+    return u;
+  }).then((r) => { profile = r.snapshot.val(); }).catch(() => { R.debitFor = null; });
+}
+
+function settleGame() {
+  const m = R.data.meta;
+  const p = me();
+  if (!isRegistered() || !p.role || !m?.gameId) return;
+  const key = `${R.code}:${m.gameId}`;
+  if (R.statsFor === key) return;
+  R.statsFor = key;
+  const won = p.role === (m.winner === 'detectives' ? 'detective' : 'liar');
+  const isBettor = !!m.bettors?.[uid()];
+  const bet = m.bet || 0;
+  const payout = isBettor ? (settlement({ bet, bettors: m.bettors, winner: m.winner }).payout[uid()] || 0) : 0;
+  const xp = xpForGame({ won, points: p.points, survived: p.role === 'liar' && p.alive });
+  runTransaction(ref(db, `users/${uid()}`), (u) => {
+    if (!u || u.settled === key) return u;
+    if (isBettor) {
+      if (u.debited !== key) { u.chips = (u.chips || 0) - bet; u.debited = key; }
+      u.chips += payout;
+    }
     u.games = (u.games || 0) + 1;
     u.wins = (u.wins || 0) + (won ? 1 : 0);
+    u.xp = (u.xp || 0) + xp;
+    u.settled = key;
+    u.lastResult = { key, chips: isBettor ? payout - bet : 0, xp, won };
     return u;
-  }).then((r) => { profile = r.snapshot.val(); }).catch(() => {});
+  }).then((r) => {
+    profile = r.snapshot.val();
+    if (screen === 'room') renderRoom(state);
+  }).catch(() => { R.statsFor = null; });
 }
 
 async function ensureSignedIn() {
@@ -279,6 +319,7 @@ async function addSelfToRoom(code, players) {
   for (let i = 2; taken.has(name.toLowerCase()); i++) name = `${base.slice(0, 13)}${i}`;
   await set(ref(db, `rooms/${code}/players/${uid()}`), {
     name, emoji: myAvatar(), guest: !isRegistered(), joinedAt: serverTimestamp(), connected: true, lastSeen: serverTimestamp(),
+    ...(isRegistered() ? { level: levelInfo(profile?.xp).level } : {}),
   });
 }
 
@@ -355,7 +396,9 @@ function render() {
   actl = null;
   if (screen === 'loading') { app.innerHTML = '<div class="wrap"><div class="logo"><div class="icons">🕵️🎭</div><h1>¿Quién <span>Miente?</span></h1><p>Cargando…</p></div></div>'; return; }
   if (screen === 'room') { app.innerHTML = '<div class="wrap"><div class="logo"><p>Entrando a la sala…</p></div></div>'; return; }
-  preserveInputs(() => { app.innerHTML = screen === 'menu' ? menuHtml() : authHtml(); });
+  preserveInputs(() => {
+    app.innerHTML = screen === 'menu' ? menuHtml() : screen === 'ranking' ? rankingHtml() : authHtml();
+  });
   const auto = $('[autofocus]', app);
   if (auto && matchMedia('(pointer: fine)').matches) auto.focus();
 }
@@ -396,7 +439,8 @@ const fmtSecs = (v) => {
   const sec = v % 60;
   return min ? `${min} min${sec ? ` ${sec} s` : ''}` : `${v} s`;
 };
-const hearts = (n) => '❤️'.repeat(n) + '🖤'.repeat(Math.max(0, 3 - n));
+const hearts = (n, max = C.DET_LIVES) => '❤️'.repeat(Math.max(0, n)) + '🖤'.repeat(Math.max(0, max - n));
+const rankLabel = (xp) => { const l = levelInfo(xp); return `${l.rankIcon} ${l.rankName} · Nv ${l.level}`; };
 const clock = (deadline, cls = 'clock') => `<span class="${cls}" data-deadline="${deadline}">${Math.max(0, Math.ceil((deadline - now()) / 1000))}</span>`;
 const bar = (deadline, total) => `<div class="timer-bar"><div data-deadline="${deadline}" data-total="${total}"></div></div>`;
 const connBanner = () => (online ? '' : '<div class="conn">Reconectando…</div>');
@@ -410,7 +454,7 @@ function authHtml() {
       <label for="g-name">¿Cómo te llamas?</label>
       <input type="text" id="g-name" name="name" maxlength="16" value="${esc(guestName)}" placeholder="Tu apodo" autocomplete="nickname" autofocus required>
       <button class="btn">Jugar como invitado</button>
-      <p class="muted small center">Como invitado no se guardan tus fichas ni estadísticas.</p>
+      <p class="muted small center">Como invitado no apuestas ni se guardan tus fichas, nivel ni estadísticas.</p>
     </form>`;
   } else if (authTab === 'login') {
     form = `<form data-action="login">
@@ -451,9 +495,10 @@ function menuHtml() {
         <div><div class="muted small">${reg ? 'Sesión iniciada' : 'Invitado'}</div><div style="font-size:22px;font-weight:600">${esc(myName())}</div></div>
         <button class="ghost small" style="flex:0 0 auto" data-action="logout">${reg ? 'Cerrar sesión' : 'Cambiar'}</button>
       </div>
-      ${reg ? `<div class="stats"><div><b>🪙 ${u?.chips || 0}</b>fichas</div><div><b>${u?.games || 0}</b>partidas</div><div><b>${u?.wins || 0}</b>victorias</div></div>` : ''}
+      ${reg ? profileHtml(u) : '<p class="muted small" style="margin:10px 0 0">Crea una cuenta para ganar fichas, subir de nivel y aparecer en el ranking.</p>'}
     </div>
     <div class="panel">
+      <button class="menu-btn" data-action="ranking"><span class="ic">🏆</span><div><b>Ranking</b><span class="muted">Quién ha ganado más partidas</span></div></button>
       <button class="menu-btn" disabled><span class="ic">🌎</span><div><b>Sala pública <span class="soon">Próximamente</span></b><span class="muted">Juega con desconocidos</span></div></button>
       <form data-action="join" class="menu-btn" style="cursor:default;display:block">
         <div style="display:flex;gap:14px;align-items:center"><span class="ic">🔑</span><div><b>Unirse a sala privada</b><span class="muted">Con el código que te compartieron</span></div></div>
@@ -472,10 +517,41 @@ function menuHtml() {
           <li>En el interrogatorio, un detective elige a un mentiroso y una de sus cartas. La pregunta se revela, pero la respuesta escrita queda oculta.</li>
           <li>El mentiroso repite en voz alta lo que respondió (y lo escribe). Puede decir lo mismo… o cambiarlo.</li>
           <li>El detective decide: <b>VERDAD</b> (dijo lo mismo) o <b>MENTIROSO</b> (cambió su respuesta).</li>
-          <li>Si acierta: +5 fichas y el mentiroso queda eliminado esa ronda. Si falla: pierde una vida (tiene 3).</li>
+          <li>Si acierta: gana 5 puntos ⭐ y el mentiroso pierde una vida (tiene 2). Si falla: el detective pierde una vida (tiene 3).</li>
           <li>Ganan los detectives si eliminan a todos los mentirosos; ganan los mentirosos si dejan sin vidas a los detectives.</li>
+          <li>Con cuenta registrada: empiezas con ${START_CHIPS} 🪙. Si el admin pone apuesta, el equipo ganador se reparte el bote. Ganas experiencia y subes de nivel.</li>
         </ol>
       </details>
+    </div>
+  </div>`;
+}
+
+function profileHtml(u) {
+  const l = levelInfo(u?.xp || 0);
+  return `<div class="stats">
+      <div><b>🪙 ${u?.chips ?? 0}</b>fichas</div>
+      <div><b>${u?.wins || 0}</b>victorias</div>
+      <div><b>${u?.games || 0}</b>partidas</div>
+    </div>
+    <div class="level-box">
+      <div class="row" style="align-items:center"><b>${l.rankIcon} ${l.rankName}</b><span class="muted small" style="text-align:right">Nivel ${l.level}</span></div>
+      <div class="xp-bar"><div style="width:${Math.round(l.progress * 100)}%"></div></div>
+      <div class="muted small">${u?.xp || 0} XP · faltan ${l.xpToNext} para el nivel ${l.level + 1}</div>
+    </div>`;
+}
+
+function rankingHtml() {
+  const rows = ui.ranking;
+  return `<div class="wrap">
+    <div class="logo"><div class="icons">🏆</div><h1>Ranking</h1><p>Quién ha ganado más partidas</p></div>
+    <div class="panel">
+      ${rows === null ? '<p class="muted center">Cargando…</p>' : rows.length ? `<ol class="ranking">${rows.map((r, i) => `<li class="${r.id === uid() ? 'me' : ''}">
+        <span class="pos">${['🥇', '🥈', '🥉'][i] || i + 1}</span>
+        <span class="av">${AVATARS.includes(r.emoji) ? r.emoji : '🙂'}</span>
+        <span class="grow"><b>${esc(r.name || 'Jugador')}</b><span class="muted small">${rankLabel(r.xp || 0)}</span></span>
+        <span class="score"><b>${r.wins || 0}</b><span class="muted small">victorias</span></span>
+      </li>`).join('')}</ol>` : '<p class="muted center">Todavía nadie ha ganado una partida.</p>'}
+      <button class="btn alt" data-action="menu">Volver</button>
     </div>
   </div>`;
 }
@@ -507,7 +583,9 @@ function playersHtml() {
     const p = player(id);
     if (!p) return '';
     const isDet = p.role === 'detective';
-    const meta = `${ROLE[p.role]?.icon || ''} ${isDet ? `${hearts(p.lives)} · 🪙${p.chips}` : (p.alive ? 'En juego' : '☠️ Eliminado')}`;
+    const meta = `${ROLE[p.role]?.icon || ''} ${isDet
+      ? `${hearts(p.lives, C.DET_LIVES)} · ⭐${p.points}`
+      : (p.alive ? hearts(p.lives, C.LIAR_LIVES) : '☠️ Eliminado')}`;
     const active = ['pick', 'question', 'result'].includes(state.phase) && (id === t.detectiveId || id === t.liarId);
     return `<div class="pl ${p.alive ? '' : 'out'} ${active ? 'active' : ''}">
       <span class="av">${p.emoji}</span>
@@ -523,6 +601,7 @@ function layout(inner) {
     <header class="topbar">
       <div class="code">Sala <b>${esc(state.code)}</b></div>
       ${state.round ? `<div class="round">· Ronda ${state.round}</div>` : ''}
+      ${state.bet ? `<div class="round">· Bote 🪙 ${state.bet * Object.keys(state.bettors).length}</div>` : ''}
       <div class="spacer"></div>
       ${m.role ? `<span class="badge ${m.role}">${ROLE[m.role].icon} ${ROLE[m.role].name}</span>` : ''}
       <button class="ghost small" data-action="leave">Salir</button>
@@ -567,7 +646,7 @@ function lobbyHtml(m) {
             ${p.id === m.id
               ? `<button class="avatar-me" data-action="avatarMenu" title="Cambiar emoji">${p.emoji}<span>✏️</span></button>`
               : `<span class="avatar">${p.emoji}</span>`}
-            <span class="grow">${esc(p.name)}${p.id === state.hostId ? ' 👑' : ''}${p.id === m.id ? ' (tú)' : ''}${p.guest ? ' <span class="muted small">· invitado</span>' : ''}${p.connected ? '' : ' <span class="muted small">· desconectado</span>'}</span>
+            <span class="grow">${esc(p.name)}${p.id === state.hostId ? ' 👑' : ''}${p.id === m.id ? ' (tú)' : ''}${p.level ? ` <span class="lvl">Nv ${p.level}</span>` : ''}${p.guest ? ' <span class="muted small">· invitado</span>' : ''}${p.connected ? '' : ' <span class="muted small">· desconectado</span>'}</span>
             ${isHost && p.id !== m.id ? `<button class="kick" data-action="kick" data-id="${esc(p.id)}" title="Sacar">✕</button>` : ''}
           </li>`).join('')}
         </ul>
@@ -581,7 +660,9 @@ function lobbyHtml(m) {
           <div><label>Detectives</label>${opt('numDetectives', range(1, 3), s.numDetectives)}</div>
           <div><label>Seg. por respuesta</label>${opt('answerTime', [12, 15, 18, 20, 25], s.answerTime, (v) => `${v} s`)}</div>
           <div><label>Tiempo para revelar</label>${opt('revealTime', [25, 30, 45, 60, 90, 120], s.revealTime, fmtSecs)}</div>
+          <div class="full"><label>Apuesta por jugador</label>${opt('bet', range(0, MAX_BET / BET_STEP).map((i) => i * BET_STEP), s.bet, (v) => (Number(v) ? `🪙 ${v} fichas` : 'Sin apuesta'))}</div>
         </div>
+        ${s.bet ? `<p class="muted small">🪙 Cada jugador registrado que tenga al menos ${s.bet} fichas pone ${s.bet} al bote. El equipo ganador se lo reparte en partes iguales. Los invitados juegan sin apostar.${isRegistered() ? ` Tienes <b>${profile?.chips ?? 0}</b> fichas.` : ''}</p>` : ''}
         ${s.numDetectives > maxDet && connected >= 2 ? `<p class="muted small">Con ${connected} jugadores solo puede haber ${maxDet} detective(s); se ajustará al iniciar.</p>` : ''}
         ${isHost
           ? `<button class="btn" data-action="start" ${connected < 2 ? 'disabled' : ''}>${connected < 2 ? 'Esperando jugadores (mín. 2)…' : '¡Iniciar partida!'}</button>`
@@ -599,7 +680,7 @@ function phaseHtml(m, entered) {
     case 'question': return questionHtml(m, entered);
     case 'result': return resultHtml(m);
     case 'roundEnd': return `<div class="banner" style="margin-top:40px">🔄 Fin de la ronda ${state.round}</div>
-      <p class="sub">Se acabaron las cartas. Los mentirosos eliminados regresan y llegan preguntas nuevas.</p>
+      <p class="sub">Se acabaron las cartas. Llegan preguntas nuevas para los mentirosos que siguen en juego.</p>
       <div class="big-clock">${clock(state.deadline, '')}</div>`;
     case 'gameover': return gameoverHtml(m);
     default: return '';
@@ -623,8 +704,9 @@ function rolesHtml(m) {
 
 function waitingHtml() {
   const a = state.answering;
+  const out = me().role === 'liar' && !me().alive;
   return `<div class="banner">⏳ Los mentirosos están respondiendo</div>
-    <p class="sub">Prepárate para interrogar. Aún no puedes ver las preguntas.</p>
+    <p class="sub">${out ? 'Quedaste eliminado, pero puedes seguir viendo la partida.' : 'Prepárate para interrogar. Aún no puedes ver las preguntas.'}</p>
     <div class="big-clock">${clock(state.deadline, '')}</div>
     <div class="status-row">${a.progress.map((p) => `<span>🎭 ${pname(p.id)}: ${p.done}/${state.numQuestions}</span>`).join('')}</div>`;
 }
@@ -757,9 +839,11 @@ function questionHtml(m, entered) {
     : `Esperando a que ${pname(t.liarId)} responda · ${clock(state.deadline)} s`;
   let action = '';
   if (m.id === t.liarId) {
+    const reminder = t.myWritten == null ? '' : `<div class="reminder"><div class="lbl">📝 Tu respuesta en esta carta (solo tú la ves)</div>
+        <input type="text" value="${esc(shown(t.myWritten) || '(no escribiste nada)')}" readonly tabindex="-1" aria-label="Tu respuesta anterior"></div>`;
     action = t.reanswered
-      ? ''
-      : `<p><b>Responde en voz alta en la llamada</b> y escríbelo aquí:</p>
+      ? reminder
+      : `${reminder}<p><b>Responde en voz alta en la llamada</b> y escríbelo aquí:</p>
         <form class="answer-form" data-action="reanswer">
           <input type="text" id="reanswer" maxlength="60" autocomplete="off" placeholder="Lo que dices…" enterkeyhint="send">
           <button class="btn">Enviar</button>
@@ -801,21 +885,31 @@ function resultHtml() {
     </div>
     <p>${r.match ? '✅ Coinciden: dijo la verdad' : '❌ No coinciden: mintió'} · El detective dijo <b>${verdict}</b></p>
     <div class="outcome ${r.correct ? 'good' : 'bad'}">${r.correct
-      ? `🎯 ¡${pname(r.detectiveId)} acertó! +5 🪙 · ${pname(r.liarId)} eliminado`
+      ? `🎯 ¡${pname(r.detectiveId)} acertó! +${C.POINTS_PER_HIT} ⭐ · ${pname(r.liarId)} ${r.liarLives ? `pierde una vida (le queda ${r.liarLives})` : 'queda eliminado'}`
       : `💔 ${pname(r.detectiveId)} falló y pierde una vida`}</div>
     <p class="muted small">Siguiente turno en ${clock(state.deadline)} s</p>`;
 }
 
 function gameoverHtml(m) {
   const winRole = state.winner === 'detectives' ? 'detective' : 'liar';
-  const sorted = [...state.players].filter((p) => p.role).sort((a, b) => (b.role === winRole) - (a.role === winRole) || b.chips - a.chips);
+  const sorted = [...state.players].filter((p) => p.role).sort((a, b) => (b.role === winRole) - (a.role === winRole) || b.points - a.points);
   const iWon = m.role === winRole;
+  const { pot, payout } = settlement({ bet: state.bet, bettors: state.bettors, winner: state.winner });
+  const lr = profile?.lastResult;
+  const mine = isRegistered() && lr?.key === `${state.code}:${state.gameId}` ? lr : null;
+  const lvl = mine ? levelInfo(profile?.xp || 0) : null;
   return `<div style="font-size:80px">${state.winner === 'detectives' ? '🕵️' : '🎭'}</div>
     <div class="banner" style="font-size:30px">¡Ganan los ${state.winner === 'detectives' ? 'detectives' : 'mentirosos'}!</div>
     <p class="sub">${iWon ? '¡Felicidades, ganaste! 🎉' : 'Será la próxima…'}</p>
+    ${mine ? `<div class="my-result">
+      ${state.bettors[m.id] ? `<b class="${mine.chips >= 0 ? 'good' : 'bad'}">${mine.chips >= 0 ? '+' : ''}${mine.chips} 🪙</b>` : ''}
+      <b>+${mine.xp} XP</b><span class="muted small">Ahora tienes ${profile.chips} 🪙 · ${lvl.rankIcon} ${lvl.rankName} · Nv ${lvl.level}</span>
+    </div>` : (state.bet && !isRegistered() ? '<p class="muted small">Como invitado no apostaste.</p>' : '')}
+    ${pot ? `<p class="muted">Bote: 🪙 ${pot}</p>` : ''}
     <ul class="leader">${sorted.map((p) => `<li class="${p.role === winRole ? 'win' : ''}">
       <span>${p.emoji}</span><span class="grow">${esc(p.name)} ${ROLE[p.role]?.icon || ''}</span>
-      <span>${p.role === 'detective' ? hearts(p.lives) : (p.alive ? 'Sobrevivió' : '☠️')}</span><b>🪙 ${p.chips}</b></li>`).join('')}</ul>
+      <span>${p.role === 'detective' ? hearts(p.lives, C.DET_LIVES) : (p.alive ? hearts(p.lives, C.LIAR_LIVES) : '☠️')}</span>
+      <b>⭐ ${p.points}</b>${state.bettors[p.id] ? `<b>${payout[p.id] - state.bet >= 0 ? '+' : ''}${payout[p.id] - state.bet} 🪙</b>` : ''}</li>`).join('')}</ul>
     ${state.hostId === m.id
       ? '<button class="btn" style="max-width:420px" data-action="lobby">Volver a la sala</button>'
       : '<p class="muted">Esperando a que el admin regrese a la sala…</p>'}`;
@@ -922,7 +1016,27 @@ const actions = {
     store.set('avatar', e);
     ui.avatarOpen = false;
     update(roomRef(`players/${uid()}`), { emoji: e }).catch(() => toast('No se pudo cambiar el emoji'));
+    if (isRegistered()) update(ref(db, `users/${uid()}`), { emoji: e }).catch(() => {});
   },
+
+  async ranking() {
+    screen = 'ranking';
+    ui.ranking = null;
+    render();
+    try {
+      const snap = await get(query(ref(db, 'users'), orderByChild('wins'), limitToLast(20)));
+      const rows = [];
+      snap.forEach((c) => { rows.push({ id: c.key, ...c.val() }); });
+      ui.ranking = rows.sort((a, b) => (b.wins || 0) - (a.wins || 0) || (b.xp || 0) - (a.xp || 0));
+    } catch (e) {
+      console.warn(e);
+      ui.ranking = [];
+      toast('No se pudo cargar el ranking');
+    }
+    if (screen === 'ranking') render();
+  },
+
+  menu() { goMenu(); },
   pick(el) { sendInput({ type: 'pick', liarId: el.dataset.liar, pos: Number(el.dataset.pos) }); },
   decide(el) { sendInput({ type: 'decide', verdict: el.dataset.v }); },
 
@@ -944,12 +1058,27 @@ function goMenu() {
 
 async function loadProfile() {
   const r = ref(db, `users/${uid()}`);
-  let p = (await get(r)).val();
-  if (!p) {
-    p = { name: cleanName(fbUser.displayName) || 'Jugador', chips: 0, games: 0, wins: 0 };
-    await set(r, p);
-  }
-  profile = p;
+  let rescued = false;
+  const res = await runTransaction(r, (p) => {
+    rescued = false;
+    if (!p) {
+      return {
+        name: cleanName(fbUser.displayName) || 'Jugador', emoji: myAvatar(),
+        chips: START_CHIPS, games: 0, wins: 0, xp: 0, created: Date.now(),
+      };
+    }
+    p.xp = p.xp || 0;
+    p.wins = p.wins || 0;
+    p.games = p.games || 0;
+    if ((p.chips ?? 0) < RESCUE_BELOW && Date.now() - (p.lastRescue || 0) > RESCUE_EVERY_MS) {
+      p.chips = RESCUE_CHIPS;
+      p.lastRescue = Date.now();
+      rescued = true;
+    }
+    return p;
+  });
+  profile = res.snapshot.val();
+  if (rescued) toast(`🪙 Te regalamos ${RESCUE_CHIPS} fichas para que sigas jugando`);
 }
 
 app.addEventListener('click', (e) => {

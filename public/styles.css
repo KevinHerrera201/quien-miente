@@ -95,6 +95,32 @@ input:focus, select:focus { border-color: var(--gold); }
 .stats div { flex: 1; background: var(--bg2); border-radius: 10px; padding: 8px; text-align: center; font-size: 13px; color: var(--muted); }
 .stats b { display: block; font-size: 20px; color: var(--text); }
 
+.level-box { background: var(--bg2); border-radius: 12px; padding: 10px 12px; margin-top: 10px; }
+.xp-bar { height: 8px; border-radius: 99px; background: var(--panel); overflow: hidden; margin: 8px 0 6px; }
+.xp-bar > div { height: 100%; background: linear-gradient(90deg, var(--blue), var(--green)); }
+.lvl { font-size: 12px; background: rgba(89, 168, 255, .2); color: var(--blue); border-radius: 99px; padding: 1px 7px; }
+
+.ranking { list-style: none; padding: 0; margin: 0; }
+.ranking li { display: flex; align-items: center; gap: 10px; padding: 10px 6px; border-bottom: 1px solid var(--line); }
+.ranking li:last-child { border-bottom: 0; }
+.ranking li.me { background: rgba(255, 201, 77, .08); border-radius: 10px; }
+.ranking .pos { width: 30px; text-align: center; font-weight: 700; font-size: 18px; }
+.ranking .av { font-size: 24px; }
+.ranking .grow { flex: 1; min-width: 0; }
+.ranking .grow b, .ranking .grow span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ranking .score { text-align: center; }
+.ranking .score b { display: block; font-size: 20px; color: var(--gold); }
+
+.reminder { max-width: 420px; margin: 10px auto; text-align: left; }
+.reminder .lbl { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+.reminder input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px dashed var(--gold); background: var(--bg2); color: var(--gold); font-size: 17px; font-weight: 600; cursor: default; }
+
+.my-result { display: flex; flex-wrap: wrap; justify-content: center; align-items: baseline; gap: 6px 14px; background: var(--bg2); border-radius: 14px; padding: 12px; max-width: 420px; margin: 0 auto 10px; font-size: 22px; }
+.my-result span { flex-basis: 100%; }
+.good { color: var(--green); }
+.bad { color: var(--red); }
+.leader li b + b { margin-left: 6px; }
+
 details { margin-top: 14px; }
 summary { cursor: pointer; color: var(--muted); }
 details ol { padding-left: 20px; line-height: 1.5; color: var(--muted); }
