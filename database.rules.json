@@ -2,9 +2,39 @@
   "rules": {
     "users": {
       ".read": "auth != null",
-      ".indexOn": ["wins"],
+      ".indexOn": ["nameLower"],
       "$uid": {
         ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "status": {
+      ".read": "auth != null",
+      "$uid": {
+        ".write": "auth != null && auth.uid === $uid"
+      }
+    },
+    "friends": {
+      "$uid": {
+        ".read": "auth != null && auth.uid === $uid",
+        "$fid": {
+          ".write": "auth != null && (auth.uid === $uid || (auth.uid === $fid && (!newData.exists() || root.child('friendRequests').child($fid).child($uid).exists())))"
+        }
+      }
+    },
+    "friendRequests": {
+      "$to": {
+        ".read": "auth != null && auth.uid === $to",
+        "$from": {
+          ".write": "auth != null && (auth.uid === $from || auth.uid === $to)"
+        }
+      }
+    },
+    "invites": {
+      "$to": {
+        ".read": "auth != null && auth.uid === $to",
+        "$id": {
+          ".write": "auth != null && (auth.uid === $to || (!data.exists() && newData.child('from').val() === auth.uid))"
+        }
       }
     },
     "rooms": {

@@ -502,7 +502,20 @@ export class HostEngine {
     const detsAlive = dets.some(alive);
     if (liarsAlive && detsAlive) return false;
     const winner = detsAlive ? 'detectives' : 'liars';
+    const winRole = detsAlive ? 'detective' : 'liar';
     u['meta/winner'] = winner;
+    // Room leaderboard: accumulates across every game played in this room.
+    for (const [id, p] of Object.entries(this.players)) {
+      if (!p.role) continue;
+      const sc = this.meta.scores?.[id] || {};
+      u[`meta/scores/${id}`] = {
+        name: p.name,
+        emoji: p.emoji || '🙂',
+        wins: (sc.wins || 0) + (p.role === winRole ? 1 : 0),
+        games: (sc.games || 0) + 1,
+        points: (sc.points || 0) + (p.points || 0),
+      };
+    }
     this.log(u, winner === 'detectives' ? '🕵️ ¡Ganan los detectives!' : '🎭 ¡Ganan los mentirosos!');
     this.phase(u, 'gameover');
     return true;

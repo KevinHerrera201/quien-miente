@@ -5,7 +5,7 @@ import {
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
   getDatabase, ref, onValue, set, update, remove, get, push, onDisconnect, serverTimestamp, runTransaction,
-  query, orderByChild, limitToLast,
+  query, orderByChild, startAt, endAt, limitToFirst,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-database.js';
 import { firebaseConfig } from './firebase-config.js';
 import { CATEGORIES, LEVELS } from './questions.js';
@@ -71,6 +71,7 @@ onValue(ref(db, '.info/serverTimeOffset'), (s) => { offset = s.val() || 0; });
 onValue(ref(db, '.info/connected'), (s) => {
   online = !!s.val();
   if (online && R.code && fbUser) setupPresence();
+  if (online) updateStatus(true);
   if (screen === 'room') renderRoom(state);
 });
 
@@ -219,7 +220,7 @@ function buildState() {
     code: R.code, phase: m.phase, deadline: m.deadline || null, round: m.round || 0, hostId: m.hostUid, meId: uid(),
     settings, winner: m.winner || null, gameId: m.gameId || null, log: toArr(m.log), maxPlayers: C.MAX_PLAYERS, players,
     detectiveOrder: toArr(m.detectiveOrder), liarOrder: toArr(m.liarOrder), numQuestions: m.numQuestions || 0,
-    bet: m.bet || 0, bettors: m.bettors || {},
+    bet: m.bet || 0, bettors: m.bettors || {}, scores: m.scores || {},
   };
   const myRole = players.find((p) => p.id === uid())?.role;
   const myCards = toArr(d.liar?.cards);
@@ -394,10 +395,12 @@ const sendInput = (data) => push(roomRef(`input/${uid()}`), { ...data, t: Date.n
 function render() {
   if (screen === 'room' && state) return renderRoom(state);
   actl = null;
+  updateStatus();
+  renderNotices();
   if (screen === 'loading') { app.innerHTML = '<div class="wrap"><div class="logo"><div class="icons">🕵️🎭</div><h1>¿Quién <span>Miente?</span></h1><p>Cargando…</p></div></div>'; return; }
   if (screen === 'room') { app.innerHTML = '<div class="wrap"><div class="logo"><p>Entrando a la sala…</p></div></div>'; return; }
   preserveInputs(() => {
-    app.innerHTML = screen === 'menu' ? menuHtml() : screen === 'ranking' ? rankingHtml() : authHtml();
+    app.innerHTML = screen === 'menu' ? menuHtml() : screen === 'friends' ? friendsHtml() : authHtml();
   });
   const auto = $('[autofocus]', app);
   if (auto && matchMedia('(pointer: fine)').matches) auto.focus();
@@ -495,10 +498,10 @@ function menuHtml() {
         <div><div class="muted small">${reg ? 'Sesión iniciada' : 'Invitado'}</div><div style="font-size:22px;font-weight:600">${esc(myName())}</div></div>
         <button class="ghost small" style="flex:0 0 auto" data-action="logout">${reg ? 'Cerrar sesión' : 'Cambiar'}</button>
       </div>
-      ${reg ? profileHtml(u) : '<p class="muted small" style="margin:10px 0 0">Crea una cuenta para ganar fichas, subir de nivel y aparecer en el ranking.</p>'}
+      ${reg ? profileHtml(u) : '<p class="muted small" style="margin:10px 0 0">Crea una cuenta para ganar fichas, subir de nivel y agregar amigos.</p>'}
     </div>
     <div class="panel">
-      <button class="menu-btn" data-action="ranking"><span class="ic">🏆</span><div><b>Ranking</b><span class="muted">Quién ha ganado más partidas</span></div></button>
+      <button class="menu-btn" data-action="friends"><span class="ic">👥</span><div><b>Amigos ${pendingCount() ? `<span class="badge-count">${pendingCount()}</span>` : ''}</b><span class="muted">${reg ? 'Busca amigos, mira quién está conectado y desafíalos' : 'Necesitas una cuenta registrada'}</span></div></button>
       <button class="menu-btn" disabled><span class="ic">🌎</span><div><b>Sala pública <span class="soon">Próximamente</span></b><span class="muted">Juega con desconocidos</span></div></button>
       <form data-action="join" class="menu-btn" style="cursor:default;display:block">
         <div style="display:flex;gap:14px;align-items:center"><span class="ic">🔑</span><div><b>Unirse a sala privada</b><span class="muted">Con el código que te compartieron</span></div></div>
@@ -540,25 +543,27 @@ function profileHtml(u) {
     </div>`;
 }
 
-function rankingHtml() {
-  const rows = ui.ranking;
-  return `<div class="wrap">
-    <div class="logo"><div class="icons">🏆</div><h1>Ranking</h1><p>Quién ha ganado más partidas</p></div>
-    <div class="panel">
-      ${rows === null ? '<p class="muted center">Cargando…</p>' : rows.length ? `<ol class="ranking">${rows.map((r, i) => `<li class="${r.id === uid() ? 'me' : ''}">
-        <span class="pos">${['🥇', '🥈', '🥉'][i] || i + 1}</span>
-        <span class="av">${AVATARS.includes(r.emoji) ? r.emoji : '🙂'}</span>
-        <span class="grow"><b>${esc(r.name || 'Jugador')}</b><span class="muted small">${rankLabel(r.xp || 0)}</span></span>
-        <span class="score"><b>${r.wins || 0}</b><span class="muted small">victorias</span></span>
-      </li>`).join('')}</ol>` : '<p class="muted center">Todavía nadie ha ganado una partida.</p>'}
-      <button class="btn alt" data-action="menu">Volver</button>
-    </div>
+function roomRankingHtml() {
+  const rows = Object.entries(state.scores)
+    .map(([id, s]) => ({ id, ...s }))
+    .sort((a, b) => (b.wins || 0) - (a.wins || 0) || (b.points || 0) - (a.points || 0));
+  if (!rows.length) return '';
+  return `<div class="room-ranking">
+    <h3>🏆 Ranking de la sala</h3>
+    <ol class="ranking">${rows.map((r, i) => `<li class="${r.id === uid() ? 'me' : ''}">
+      <span class="pos">${['🥇', '🥈', '🥉'][i] || i + 1}</span>
+      <span class="av">${AVATARS.includes(r.emoji) ? r.emoji : '🙂'}</span>
+      <span class="grow"><b>${esc(r.name || 'Jugador')}</b><span class="muted small">${r.games || 0} partida${r.games === 1 ? '' : 's'} · ⭐ ${r.points || 0}</span></span>
+      <span class="score"><b>${r.wins || 0}</b><span class="muted small">victorias</span></span>
+    </li>`).join('')}</ol>
   </div>`;
 }
 
 /* ---------------- Room screens ---------------- */
 function renderRoom(prev) {
   if (screen !== 'room' || !state) return render();
+  updateStatus();
+  renderNotices();
   if (state.phase === 'answering' && state.answering?.cards) {
     if (!actl || actl.round !== state.round || !$('#aslot')) startAnswering();
     else updateAnswerProgress();
@@ -651,6 +656,8 @@ function lobbyHtml(m) {
           </li>`).join('')}
         </ul>
         ${ui.avatarOpen ? `<div class="avatar-picker"><div class="muted small">Elige tu emoji</div><div class="avatar-grid">${AVATARS.map((a) => `<button class="avatar-btn ${a === m.emoji ? 'on' : ''}" data-action="setAvatar" data-e="${a}">${a}</button>`).join('')}</div></div>` : ''}
+        ${friendsInviteHtml()}
+        ${roomRankingHtml()}
       </div>
       <div class="panel">
         <h3>Ajustes ${isHost ? '' : '<span class="muted small">(solo el admin los cambia)</span>'}</h3>
@@ -910,9 +917,210 @@ function gameoverHtml(m) {
       <span>${p.emoji}</span><span class="grow">${esc(p.name)} ${ROLE[p.role]?.icon || ''}</span>
       <span>${p.role === 'detective' ? hearts(p.lives, C.DET_LIVES) : (p.alive ? hearts(p.lives, C.LIAR_LIVES) : '☠️')}</span>
       <b>⭐ ${p.points}</b>${state.bettors[p.id] ? `<b>${payout[p.id] - state.bet >= 0 ? '+' : ''}${payout[p.id] - state.bet} 🪙</b>` : ''}</li>`).join('')}</ul>
+    <div style="max-width:420px;margin:0 auto">${roomRankingHtml()}</div>
     ${state.hostId === m.id
       ? '<button class="btn" style="max-width:420px" data-action="lobby">Volver a la sala</button>'
       : '<p class="muted">Esperando a que el admin regrese a la sala…</p>'}`;
+}
+
+/* ---------------- Friends, presence and invites ---------------- */
+const INVITE_TTL = 15 * 60000;
+const STATUS = {
+  online: ['🟢', 'Conectado'],
+  lobby: ['🟡', 'En sala'],
+  playing: ['🔴', 'Jugando'],
+  offline: ['⚫', 'Desconectado'],
+};
+const S = { uid: null, unsubs: [], friends: {}, requests: {}, invites: {}, status: {}, info: {}, watch: {}, lastStatus: null };
+
+const liveInvites = () => Object.entries(S.invites)
+  .map(([id, i]) => ({ id, ...i }))
+  .filter((i) => i.room && now() - (i.t || 0) < INVITE_TTL)
+  .sort((a, b) => (b.t || 0) - (a.t || 0));
+const pendingCount = () => Object.keys(S.requests).length + liveInvites().length;
+const friendStatus = (id) => {
+  const s = S.status[id];
+  return s && STATUS[s.state] ? s : { state: 'offline' };
+};
+
+function startSocial() {
+  if (!isRegistered() || S.uid === uid()) return;
+  stopSocial();
+  S.uid = uid();
+  const sub = (path, fn) => S.unsubs.push(onValue(ref(db, path), (s) => fn(s.val() || {}), (e) => console.warn(path, e.message)));
+  sub(`friends/${S.uid}`, (v) => { S.friends = v; syncFriendWatchers(); refreshSocial(); });
+  sub(`friendRequests/${S.uid}`, (v) => { S.requests = v; refreshSocial(); });
+  sub(`invites/${S.uid}`, (v) => { S.invites = v; refreshSocial(); });
+  updateStatus();
+}
+
+function stopSocial() {
+  S.unsubs.forEach((u) => u());
+  Object.values(S.watch).forEach((u) => u());
+  Object.assign(S, { uid: null, unsubs: [], friends: {}, requests: {}, invites: {}, status: {}, info: {}, watch: {}, lastStatus: null });
+  renderNotices();
+}
+
+function syncFriendWatchers() {
+  for (const id of Object.keys(S.watch)) {
+    if (!S.friends[id]) { S.watch[id](); delete S.watch[id]; delete S.status[id]; }
+  }
+  for (const id of Object.keys(S.friends)) {
+    if (S.watch[id]) continue;
+    S.watch[id] = onValue(ref(db, `status/${id}`), (s) => { S.status[id] = s.val(); refreshSocial(); });
+    get(ref(db, `users/${id}`)).then((s) => { S.info[id] = s.val() || {}; refreshSocial(); }).catch(() => {});
+  }
+}
+
+function refreshSocial() {
+  renderNotices();
+  if (screen === 'friends' || screen === 'menu') render();
+  else if (screen === 'room' && state?.phase === 'lobby') renderRoom(state);
+}
+
+// Tells friends where we are: menu (online), in a room's lobby, or in a game.
+function updateStatus(force = false) {
+  if (!isRegistered() || !S.uid) return;
+  const inGame = screen === 'room' && state && !['lobby', 'gameover'].includes(state.phase);
+  const st = screen === 'room' && R.code ? (inGame ? 'playing' : 'lobby') : 'online';
+  const room = st === 'online' ? null : R.code;
+  const key = `${st}:${room}`;
+  if (!force && key === S.lastStatus) return;
+  S.lastStatus = key;
+  const r = ref(db, `status/${S.uid}`);
+  onDisconnect(r).set({ state: 'offline', t: serverTimestamp() }).catch(() => {});
+  set(r, { state: st, room, t: serverTimestamp() }).catch(() => {});
+}
+
+async function searchUsers(q) {
+  q = cleanName(q).toLowerCase();
+  if (q.length < 2) { ui.search = []; return render(); }
+  ui.search = null;
+  render();
+  try {
+    const snap = await get(query(ref(db, 'users'), orderByChild('nameLower'), startAt(q), endAt(`${q}`), limitToFirst(15)));
+    const rows = [];
+    snap.forEach((c) => { if (c.key !== uid()) rows.push({ id: c.key, ...c.val() }); });
+    ui.search = rows;
+  } catch (e) {
+    console.warn(e);
+    ui.search = [];
+    toast('No se pudo buscar');
+  }
+  if (screen === 'friends') render();
+}
+
+function sendInvite(to, type, room) {
+  return push(ref(db, `invites/${to}`), {
+    from: uid(), name: myName(), emoji: myAvatar(), room, type, t: serverTimestamp(),
+  });
+}
+
+function friendRow(id, actionsHtml, extra = '') {
+  const info = S.info[id] || {};
+  return `<li>
+    <span class="av">${AVATARS.includes(info.emoji) ? info.emoji : '🙂'}</span>
+    <span class="grow"><b>${esc(info.name || 'Jugador')}</b><span class="muted small">${extra || rankLabel(info.xp || 0)}</span></span>
+    <span class="row-actions">${actionsHtml}</span>
+  </li>`;
+}
+
+function friendsHtml() {
+  const head = '<div class="logo"><div class="icons">👥</div><h1>Amigos</h1></div>';
+  if (!isRegistered()) {
+    return `<div class="wrap">${head}<div class="panel center">
+      <p>Para agregar amigos necesitas una <b>cuenta registrada</b>.</p>
+      <button class="btn" data-action="tab" data-tab="register">Crear cuenta</button>
+      <button class="btn alt" data-action="menu">Volver</button></div></div>`;
+  }
+  const order = { online: 0, lobby: 1, playing: 2, offline: 3 };
+  const friends = Object.keys(S.friends).sort((a, b) => order[friendStatus(a).state] - order[friendStatus(b).state]
+    || String(S.info[a]?.name || '').localeCompare(String(S.info[b]?.name || '')));
+  const requests = Object.entries(S.requests);
+  const invites = liveInvites();
+  const search = ui.search;
+
+  const searchRows = search === undefined ? '' : search === null ? '<p class="muted small">Buscando…</p>'
+    : search.length ? `<ul class="friend-list">${search.map((u) => {
+      let btn;
+      if (S.friends[u.id]) btn = '<span class="muted small">Ya es tu amigo</span>';
+      else if (S.requests[u.id]) btn = `<button class="chip-btn on" data-action="acceptFriend" data-id="${esc(u.id)}">Aceptar</button>`;
+      else if (ui.sent?.[u.id]) btn = '<span class="muted small">Solicitud enviada</span>';
+      else btn = `<button class="chip-btn" data-action="addFriend" data-id="${esc(u.id)}">➕ Agregar</button>`;
+      S.info[u.id] = S.info[u.id] || u;
+      return friendRow(u.id, btn);
+    }).join('')}</ul>` : '<p class="muted small">No encontramos a nadie con ese nombre.</p>';
+
+  return `<div class="wrap">${head}
+    ${invites.length ? `<div class="panel"><h3>📨 Invitaciones</h3><ul class="friend-list">${invites.map((i) => `<li>
+      <span class="av">${AVATARS.includes(i.emoji) ? i.emoji : '🙂'}</span>
+      <span class="grow"><b>${esc(i.name)}</b><span class="muted small">${i.type === 'challenge' ? '🎯 Te desafía a una partida' : `Te invita a su sala ${esc(i.room)}`}</span></span>
+      <span class="row-actions"><button class="chip-btn on" data-action="acceptInvite" data-id="${esc(i.id)}">Aceptar</button><button class="chip-btn" data-action="declineInvite" data-id="${esc(i.id)}">✕</button></span>
+    </li>`).join('')}</ul></div>` : ''}
+    ${requests.length ? `<div class="panel"><h3>🙋 Solicitudes de amistad</h3><ul class="friend-list">${requests.map(([id, r]) => {
+      S.info[id] = S.info[id] || { name: r.name, emoji: r.emoji };
+      return friendRow(id, `<button class="chip-btn on" data-action="acceptFriend" data-id="${esc(id)}">Aceptar</button><button class="chip-btn" data-action="declineFriend" data-id="${esc(id)}">Rechazar</button>`, 'Quiere ser tu amigo');
+    }).join('')}</ul></div>` : ''}
+    <div class="panel">
+      <h3>🔍 Buscar jugadores</h3>
+      <form data-action="searchFriends" class="row">
+        <input type="text" id="friend-q" name="q" maxlength="16" placeholder="Nombre de usuario" autocomplete="off">
+        <button class="btn" style="margin:0;flex:0 0 auto;width:auto">Buscar</button>
+      </form>
+      ${searchRows}
+    </div>
+    <div class="panel">
+      <h3>Mis amigos (${friends.length})</h3>
+      ${friends.length ? `<ul class="friend-list">${friends.map((id) => {
+        const st = friendStatus(id);
+        const [dot, label] = STATUS[st.state];
+        const where = st.room && st.state !== 'online' ? ` · sala ${esc(st.room)}` : '';
+        const canJoin = st.state === 'lobby' && st.room;
+        return friendRow(id, `
+          ${canJoin ? `<button class="chip-btn" data-action="joinFriend" data-room="${esc(st.room)}">Unirme</button>` : ''}
+          <button class="chip-btn" data-action="challenge" data-id="${esc(id)}" ${st.state === 'offline' ? 'disabled' : ''}>🎯 Desafiar</button>
+          <button class="chip-btn danger" data-action="removeFriend" data-id="${esc(id)}" title="Eliminar amigo">🗑️</button>`,
+        `${dot} ${label}${where}`);
+      }).join('')}</ul>` : '<p class="muted small">Todavía no tienes amigos. Búscalos por su nombre de usuario.</p>'}
+    </div>
+    <button class="btn alt" data-action="menu">Volver</button>
+  </div>`;
+}
+
+// Lobby panel to invite online friends into the current room.
+function friendsInviteHtml() {
+  if (!isRegistered()) return '';
+  const ids = Object.keys(S.friends).filter((id) => friendStatus(id).state !== 'offline');
+  if (!Object.keys(S.friends).length) return '';
+  return `<div class="room-ranking">
+    <h3>👥 Invitar amigos</h3>
+    ${ids.length ? `<ul class="friend-list">${ids.map((id) => {
+      const st = friendStatus(id);
+      const here = st.room === state.code;
+      const [dot, label] = STATUS[st.state];
+      return friendRow(id, here ? '<span class="muted small">Ya está aquí</span>'
+        : ui.invited?.[`${state.code}:${id}`] ? '<span class="muted small">Invitado ✓</span>'
+          : `<button class="chip-btn" data-action="inviteFriend" data-id="${esc(id)}">📨 Invitar</button>`, `${dot} ${label}`);
+    }).join('')}</ul>` : '<p class="muted small">Ninguno de tus amigos está conectado ahora.</p>'}
+  </div>`;
+}
+
+async function goOffline() {
+  if (S.uid) await set(ref(db, `status/${S.uid}`), { state: 'offline', t: serverTimestamp() }).catch(() => {});
+  stopSocial();
+}
+
+function renderNotices() {
+  const el = $('#notice');
+  if (!el) return;
+  const inv = isRegistered() ? liveInvites()[0] : null;
+  if (!inv || (screen === 'room' && R.code === inv.room)) { el.innerHTML = ''; return; }
+  el.innerHTML = `<div class="notice-card">
+    <span class="av">${AVATARS.includes(inv.emoji) ? inv.emoji : '🙂'}</span>
+    <div class="grow"><b>${esc(inv.name)}</b> ${inv.type === 'challenge' ? 'te desafía a una partida 🎯' : `te invita a su sala <b>${esc(inv.room)}</b>`}</div>
+    <button class="chip-btn on" data-action="acceptInvite" data-id="${esc(inv.id)}">Aceptar</button>
+    <button class="chip-btn" data-action="declineInvite" data-id="${esc(inv.id)}">✕</button>
+  </div>`;
 }
 
 /* ---------------- Actions ---------------- */
@@ -922,7 +1130,7 @@ const hostOnly = (fn) => (...args) => {
 };
 
 const actions = {
-  tab(el) { authTab = el.dataset.tab; authNote = ''; render(); },
+  tab(el) { authTab = el.dataset.tab; authNote = ''; screen = 'auth'; render(); },
 
   async guest(f) {
     const name = cleanName(f.name.value);
@@ -930,7 +1138,7 @@ const actions = {
     guestName = name;
     store.set('guestName', guestName);
     try {
-      if (fbUser && !fbUser.isAnonymous) await signOut(auth);
+      if (fbUser && !fbUser.isAnonymous) { await goOffline(); await signOut(auth); }
       if (!auth.currentUser) await signInAnonymously(auth);
       goMenu();
     } catch (e) { authNote = esc(authMsg(e)); render(); }
@@ -974,6 +1182,7 @@ const actions = {
 
   async logout() {
     if (isRegistered()) {
+      await goOffline();
       await signOut(auth);
       profile = null;
     }
@@ -1019,24 +1228,87 @@ const actions = {
     if (isRegistered()) update(ref(db, `users/${uid()}`), { emoji: e }).catch(() => {});
   },
 
-  async ranking() {
-    screen = 'ranking';
-    ui.ranking = null;
+  friends() {
+    screen = 'friends';
+    ui.search = undefined;
     render();
-    try {
-      const snap = await get(query(ref(db, 'users'), orderByChild('wins'), limitToLast(20)));
-      const rows = [];
-      snap.forEach((c) => { rows.push({ id: c.key, ...c.val() }); });
-      ui.ranking = rows.sort((a, b) => (b.wins || 0) - (a.wins || 0) || (b.xp || 0) - (a.xp || 0));
-    } catch (e) {
-      console.warn(e);
-      ui.ranking = [];
-      toast('No se pudo cargar el ranking');
-    }
-    if (screen === 'ranking') render();
   },
 
   menu() { goMenu(); },
+
+  searchFriends(f) { searchUsers(f.q.value); },
+
+  async addFriend(el) {
+    const id = el.dataset.id;
+    if (S.requests[id]) return actions.acceptFriend(el);
+    try {
+      await set(ref(db, `friendRequests/${id}/${uid()}`), { name: myName(), emoji: myAvatar(), t: serverTimestamp() });
+      ui.sent = { ...ui.sent, [id]: true };
+      toast('Solicitud enviada');
+      render();
+    } catch { toast('No se pudo enviar la solicitud'); }
+  },
+
+  async acceptFriend(el) {
+    const id = el.dataset.id;
+    try {
+      await update(ref(db), {
+        [`friends/${uid()}/${id}`]: true,
+        [`friends/${id}/${uid()}`]: true,
+        [`friendRequests/${uid()}/${id}`]: null,
+      });
+      toast('¡Ahora son amigos!');
+    } catch { toast('No se pudo aceptar'); }
+  },
+
+  declineFriend(el) { remove(ref(db, `friendRequests/${uid()}/${el.dataset.id}`)).catch(() => {}); },
+
+  async removeFriend(el) {
+    const id = el.dataset.id;
+    if (!confirm(`¿Eliminar a ${S.info[id]?.name || 'este jugador'} de tus amigos?`)) return;
+    try {
+      await update(ref(db), { [`friends/${uid()}/${id}`]: null, [`friends/${id}/${uid()}`]: null });
+      toast('Amigo eliminado');
+    } catch { toast('No se pudo eliminar'); }
+  },
+
+  async challenge(el) {
+    const id = el.dataset.id;
+    await createRoom();
+    if (!R.code) return;
+    try {
+      await sendInvite(id, 'challenge', R.code);
+      ui.invited = { ...ui.invited, [`${R.code}:${id}`]: true };
+      toast(`Desafío enviado a ${S.info[id]?.name || 'tu amigo'}`);
+    } catch { toast('No se pudo enviar el desafío'); }
+  },
+
+  async inviteFriend(el) {
+    const id = el.dataset.id;
+    if (!R.code) return;
+    try {
+      await sendInvite(id, 'invite', R.code);
+      ui.invited = { ...ui.invited, [`${R.code}:${id}`]: true };
+      toast('Invitación enviada');
+      renderRoom(state);
+    } catch { toast('No se pudo invitar'); }
+  },
+
+  joinFriend(el) { joinRoom(el.dataset.room); },
+
+  async acceptInvite(el) {
+    const inv = S.invites[el.dataset.id];
+    remove(ref(db, `invites/${uid()}/${el.dataset.id}`)).catch(() => {});
+    if (!inv?.room) return;
+    if (R.code) {
+      if (R.code === inv.room) return;
+      if (state && !['lobby', 'gameover'].includes(state.phase) && !confirm('Estás en una partida. ¿Salir para unirte?')) return;
+      await leaveRoom();
+    }
+    joinRoom(inv.room);
+  },
+
+  declineInvite(el) { remove(ref(db, `invites/${uid()}/${el.dataset.id}`)).catch(() => {}); },
   pick(el) { sendInput({ type: 'pick', liarId: el.dataset.liar, pos: Number(el.dataset.pos) }); },
   decide(el) { sendInput({ type: 'decide', verdict: el.dataset.v }); },
 
@@ -1064,10 +1336,12 @@ async function loadProfile() {
     if (!p) {
       return {
         name: cleanName(fbUser.displayName) || 'Jugador', emoji: myAvatar(),
+        nameLower: (cleanName(fbUser.displayName) || 'Jugador').toLowerCase(),
         chips: START_CHIPS, games: 0, wins: 0, xp: 0, created: Date.now(),
       };
     }
     p.xp = p.xp || 0;
+    p.nameLower = String(p.name || '').toLowerCase();
     p.wins = p.wins || 0;
     p.games = p.games || 0;
     if ((p.chips ?? 0) < RESCUE_BELOW && Date.now() - (p.lastRescue || 0) > RESCUE_EVERY_MS) {
@@ -1078,10 +1352,11 @@ async function loadProfile() {
     return p;
   });
   profile = res.snapshot.val();
+  startSocial();
   if (rescued) toast(`🪙 Te regalamos ${RESCUE_CHIPS} fichas para que sigas jugando`);
 }
 
-app.addEventListener('click', (e) => {
+document.body.addEventListener('click', (e) => {
   const el = e.target.closest('[data-action]');
   if (!el || el.tagName === 'FORM' || el.disabled) return;
   e.preventDefault();

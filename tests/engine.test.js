@@ -191,6 +191,9 @@ await run();
 ok(meta().result.correct === false && pl(det).lives === 0, 'detective se queda sin vidas');
 await run(7100);
 ok(meta().phase === 'gameover' && meta().winner === 'liars', 'ganan los mentirosos');
+const sc1 = meta().scores || {};
+ok(Object.keys(sc1).length === 3 && sc1[det].wins === 0 && liars.every((id) => sc1[id].wins === 1 && sc1[id].games === 1), 'ranking de la sala: 1 victoria para cada mentiroso');
+ok(sc1[det].points === 5, 'ranking de la sala acumula los puntos del detective');
 
 await eng.backToLobby();
 ok(meta().phase === 'lobby' && !pl('beto').role && !F.getAt(R('hostData')), 'regresan a la sala limpia');
@@ -218,6 +221,7 @@ while (meta().phase === 'pick' && turns < 20) {
   await run(7100);
 }
 ok(meta().phase === 'gameover' && meta().winner === 'detectives' && turns === 4, `2 aciertos por mentiroso: ganan los detectives en ${turns} turnos`);
+ok(Object.values(meta().scores).every((s) => s.games === 2) && meta().scores[d2].wins >= 1, 'el ranking de la sala se acumula entre partidas');
 
 // Salida de un jugador a media partida
 await eng.backToLobby();

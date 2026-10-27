@@ -111,6 +111,29 @@ input:focus, select:focus { border-color: var(--gold); }
 .ranking .score { text-align: center; }
 .ranking .score b { display: block; font-size: 20px; color: var(--gold); }
 
+.room-ranking { margin-top: 18px; text-align: left; }
+.room-ranking h3 { margin: 0 0 6px; }
+
+.friend-list { list-style: none; padding: 0; margin: 8px 0 0; }
+.friend-list li { display: flex; align-items: center; gap: 10px; padding: 9px 2px; border-bottom: 1px solid var(--line); }
+.friend-list li:last-child { border-bottom: 0; }
+.friend-list .av { font-size: 24px; width: 32px; text-align: center; }
+.friend-list .grow { flex: 1; min-width: 0; text-align: left; }
+.friend-list .grow b, .friend-list .grow span { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: flex-end; }
+.row-actions .chip-btn { padding: 7px 11px; font-size: 14px; }
+.chip-btn.danger { border-color: rgba(255, 90, 110, .5); }
+.badge-count { display: inline-block; min-width: 22px; padding: 1px 7px; border-radius: 99px; background: var(--red); color: #fff; font-size: 13px; text-align: center; margin-left: 6px; }
+
+#notice { position: fixed; top: calc(10px + env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 20; width: min(460px, calc(100% - 24px)); }
+.notice-card {
+  display: flex; align-items: center; gap: 10px; background: var(--panel2); border: 1px solid var(--gold);
+  border-radius: 14px; padding: 10px 12px; box-shadow: var(--shadow); animation: pop .3s;
+}
+.notice-card .av { font-size: 26px; }
+.notice-card .grow { flex: 1; font-size: 15px; }
+.notice-card .chip-btn { padding: 7px 11px; }
+
 .reminder { max-width: 420px; margin: 10px auto; text-align: left; }
 .reminder .lbl { font-size: 13px; color: var(--muted); margin-bottom: 4px; }
 .reminder input { width: 100%; padding: 10px 12px; border-radius: 10px; border: 1px dashed var(--gold); background: var(--bg2); color: var(--gold); font-size: 17px; font-weight: 600; cursor: default; }
